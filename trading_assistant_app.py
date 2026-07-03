@@ -63,6 +63,7 @@ class TradingAssistantApp:
         self.running = False
         self.scan_in_progress = False
         self.update_in_progress = False
+        self.update_started_at: dt.datetime | None = None
         self.alerted_keys: set[str] = set()
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.action_buttons: dict[str, ttk.Button] = {}
@@ -791,8 +792,9 @@ class TradingAssistantApp:
             self.set_update_event("源码目录", "当前是源码目录，请用 git pull 或发布包更新，避免覆盖工作区。")
             return
         self.update_in_progress = True
+        self.update_started_at = dt.datetime.now()
         self.update_button.state(["disabled"])
-        self.set_update_event("正在检查", "正在检查 GitHub Release...")
+        self.set_update_event("正在检查", "正在检查 GitHub Release，请稍等...")
         thread = threading.Thread(target=self.update_worker, args=(updater,), daemon=True)
         thread.start()
 
@@ -806,10 +808,12 @@ class TradingAssistantApp:
             str(updater),
             "-InstallDir",
             str(self.install_dir),
+            "-QuietCheckIntervalHours",
+            "0",
         ]
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            result = subprocess.run(command, text=True, capture_output=True, cwd=self.install_dir, creationflags=creationflags)
+            result = subprocess.run(command, text=True, capture_output=True, cwd=self.install_dir, creationflags=creationflags, timeout=60)
             self.event_queue.put(
                 (
                     "update_done",
@@ -820,11 +824,18 @@ class TradingAssistantApp:
                     },
                 )
             )
+        except subprocess.TimeoutExpired as exc:
+            self.event_queue.put(("update_done", {"returncode": 1, "stdout": exc.stdout or "", "stderr": "检查更新超时，请稍后重试或检查网络。"}))
         except Exception as exc:
             self.event_queue.put(("update_done", {"returncode": 1, "stdout": "", "stderr": str(exc)}))
 
     def on_update_done(self, result: dict[str, object]) -> None:
         self.update_in_progress = False
+        elapsed = ""
+        if self.update_started_at is not None:
+            elapsed_seconds = max(0, int((dt.datetime.now() - self.update_started_at).total_seconds()))
+            elapsed = f"（用时 {elapsed_seconds} 秒）"
+        self.update_started_at = None
         self.update_button.state(["!disabled"])
         stdout = str(result.get("stdout", "")).strip()
         stderr = str(result.get("stderr", "")).strip()
@@ -835,11 +846,17 @@ class TradingAssistantApp:
         self.version_text.set(f"版本：v{self.version}")
         if returncode == 0:
             if message.lower().startswith("updated to"):
-                self.set_update_event("已更新，需重启", f"{message}，重启后使用新版。")
+                detail = f"{message}，重启后使用新版。{elapsed}"
+                self.set_update_event("已更新，需重启", detail)
+                messagebox.showinfo("更新完成", detail)
             else:
-                self.set_update_event("检查完成", message)
+                detail = f"{message}{elapsed}"
+                self.set_update_event("检查完成", detail)
+                messagebox.showinfo("检查更新", detail)
         else:
-            self.set_update_event("更新失败", message)
+            detail = f"{message}{elapsed}"
+            self.set_update_event("更新失败", detail)
+            messagebox.showerror("更新失败", detail)
 
     def test_alert(self) -> None:
         self.show_trade_alert(
