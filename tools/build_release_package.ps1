@@ -12,6 +12,7 @@ if (-not $Version) {
 $PackageName = "StocksTradingAssistant-v$Version"
 $TempRoot = Join-Path $Root "release_tmp"
 $PackageRoot = Join-Path $TempRoot $PackageName
+$AppPayloadRoot = Join-Path $PackageRoot "app"
 $PyInstallerWork = Join-Path $TempRoot "pyinstaller_work"
 $PyInstallerDist = Join-Path $TempRoot "pyinstaller_dist"
 $DistRoot = Join-Path $Root $OutputDir
@@ -19,7 +20,36 @@ $ZipPath = Join-Path $DistRoot "$PackageName.zip"
 
 Remove-Item -Recurse -Force $TempRoot -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $AppPayloadRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
+
+function Get-RelativePathText {
+    param(
+        [string]$Base,
+        [string]$Path
+    )
+    $baseFull = (Resolve-Path $Base).Path.TrimEnd("\") + "\"
+    $pathFull = (Resolve-Path $Path).Path
+    $baseUri = New-Object System.Uri($baseFull)
+    $pathUri = New-Object System.Uri($pathFull)
+    return [System.Uri]::UnescapeDataString($baseUri.MakeRelativeUri($pathUri).ToString()).Replace("/", "\")
+}
+
+function New-ManifestEntry {
+    param(
+        [string]$SourceBase,
+        [string]$SourcePath,
+        [string]$TargetPath
+    )
+    $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $SourcePath
+    $file = Get-Item -LiteralPath $SourcePath
+    return [ordered]@{
+        source = (Get-RelativePathText -Base $PackageRoot -Path $SourcePath)
+        target = $TargetPath.Replace("/", "\")
+        sha256 = $hash.Hash.ToLowerInvariant()
+        size = $file.Length
+    }
+}
 
 Copy-Item -Force (Join-Path $Root "installer\Install-StocksTool.ps1") (Join-Path $PackageRoot "Install-StocksTool.ps1")
 Copy-Item -Force (Join-Path $Root "installer\Update-StocksTool.ps1") (Join-Path $PackageRoot "Update-StocksTool.ps1")
@@ -35,7 +65,7 @@ if ($LASTEXITCODE -ne 0) {
     --noconfirm `
     --clean `
     --windowed `
-    --onefile `
+    --onedir `
     --name StocksTradingAssistant `
     --hidden-import short_term_live_monitor `
     --exclude-module torch `
@@ -59,7 +89,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
-Copy-Item -Force (Join-Path $PyInstallerDist "StocksTradingAssistant.exe") (Join-Path $PackageRoot "StocksTradingAssistant.exe")
+Copy-Item -Recurse -Force (Join-Path $PyInstallerDist "StocksTradingAssistant\*") $AppPayloadRoot
 
 $manifest = [ordered]@{
     name = "Stocks Trading Assistant"
@@ -67,6 +97,8 @@ $manifest = [ordered]@{
     repository = "Sulfoxide319/Stocks"
     generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     executable = "StocksTradingAssistant.exe"
+    package_layout = "onedir"
+    app_dir = "app"
     start_script = "Start-TradingAssistant.bat"
     installer = "Install-StocksTool.ps1"
     updater = "Update-StocksTool.ps1"
@@ -85,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File .\Install-StocksTool.ps1
 ```
 
 The installer copies the app to `%LOCALAPPDATA%\StocksTradingAssistant` and
-creates a desktop shortcut. Python is not required for the packaged EXE.
+creates a desktop shortcut. Python is not required for the packaged app.
 
 ## Start
 
@@ -96,11 +128,34 @@ StocksTradingAssistant.exe
 ```
 
 You can also run `Start-TradingAssistant.bat` directly from the extracted zip
-folder. It checks for updates and launches the packaged EXE.
+folder. It checks for updates and launches the packaged app.
 
 The start script checks GitHub Releases for updates before launching the app.
 "@
 $readme | Set-Content -Encoding UTF8 (Join-Path $PackageRoot "README_INSTALL.md")
+
+$files = @()
+foreach ($file in Get-ChildItem -LiteralPath $AppPayloadRoot -Recurse -File) {
+    $target = Get-RelativePathText -Base $AppPayloadRoot -Path $file.FullName
+    $files += New-ManifestEntry -SourceBase $PackageRoot -SourcePath $file.FullName -TargetPath $target
+}
+foreach ($name in @("Update-StocksTool.ps1", "Start-TradingAssistant.bat", "VERSION", "release.json")) {
+    $source = Join-Path $PackageRoot $name
+    if (Test-Path $source) {
+        $files += New-ManifestEntry -SourceBase $PackageRoot -SourcePath $source -TargetPath $name
+    }
+}
+$updateManifest = [ordered]@{
+    schema = 1
+    name = "Stocks Trading Assistant"
+    version = $Version
+    repository = "Sulfoxide319/Stocks"
+    layout = "onedir"
+    executable = "StocksTradingAssistant.exe"
+    generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    files = $files
+}
+$updateManifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $PackageRoot "update_manifest.json")
 
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $ZipPath -Force

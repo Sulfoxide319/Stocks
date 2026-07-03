@@ -36,6 +36,59 @@ function Copy-DirectoryContent {
     }
 }
 
+function Get-FileSha256 {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) {
+        return ""
+    }
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Copy-ChangedManagedFiles {
+    param(
+        [string]$PackageRoot,
+        [string]$InstallDir,
+        [object]$Manifest
+    )
+    $copied = 0
+    $targets = @{}
+    foreach ($file in $Manifest.files) {
+        $source = Join-Path $PackageRoot ([string]$file.source)
+        $target = Join-Path $InstallDir ([string]$file.target)
+        $targets[[string]$file.target] = $true
+        if (-not (Test-Path $source)) {
+            throw "Package file was not found: $source"
+        }
+        $targetHash = Get-FileSha256 $target
+        if ($targetHash -ne [string]$file.sha256) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+            Copy-Item -Force -LiteralPath $source -Destination $target
+            $copied += 1
+        }
+    }
+
+    $previousManifestPath = Join-Path $InstallDir ".install_manifest.json"
+    if (Test-Path $previousManifestPath) {
+        try {
+            $previous = Get-Content $previousManifestPath -Raw | ConvertFrom-Json
+            foreach ($oldFile in $previous.files) {
+                $oldTarget = [string]$oldFile.target
+                if (-not $targets.ContainsKey($oldTarget)) {
+                    $oldPath = Join-Path $InstallDir $oldTarget
+                    if (Test-Path $oldPath) {
+                        Remove-Item -Force -LiteralPath $oldPath
+                    }
+                }
+            }
+        } catch {
+            # A bad old manifest should not block installation.
+        }
+    }
+
+    Copy-Item -Force -LiteralPath (Join-Path $PackageRoot "update_manifest.json") -Destination $previousManifestPath
+    return $copied
+}
+
 if (-not $PackageRoot) {
     $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
@@ -46,12 +99,19 @@ if (-not (Test-Path $AppSource)) {
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Copy-DirectoryContent -Source $AppSource -Destination $InstallDir
+$manifestPath = Join-Path $PackageRoot "update_manifest.json"
+if (Test-Path $manifestPath) {
+    $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    $copiedCount = Copy-ChangedManagedFiles -PackageRoot $PackageRoot -InstallDir $InstallDir -Manifest $manifest
+    Write-Host "Applied $copiedCount changed file(s)."
+} else {
+    Copy-DirectoryContent -Source $AppSource -Destination $InstallDir
 
-foreach ($file in @("StocksTradingAssistant.exe", "Update-StocksTool.ps1", "Start-TradingAssistant.bat", "VERSION", "release.json")) {
-    $source = Join-Path $PackageRoot $file
-    if (Test-Path $source) {
-        Copy-Item -Force $source (Join-Path $InstallDir $file)
+    foreach ($file in @("StocksTradingAssistant.exe", "Update-StocksTool.ps1", "Start-TradingAssistant.bat", "VERSION", "release.json")) {
+        $source = Join-Path $PackageRoot $file
+        if (Test-Path $source) {
+            Copy-Item -Force $source (Join-Path $InstallDir $file)
+        }
     }
 }
 
