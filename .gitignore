@@ -4,6 +4,7 @@ __pycache__/
 .env
 *.log
 config/xueqiu_cookie.txt
+config/live_positions.csv
 .xueqiu-edge-profile/
 output/*
 !output/live_advice/
@@ -11,3 +12,9 @@ output/live_advice/*
 !output/live_advice/latest.md
 !output/live_advice/latest.csv
 !output/live_advice/.gitkeep
+!output/trading_assistant/
+output/trading_assistant/*
+!output/trading_assistant/latest_plan.md
+!output/trading_assistant/latest_plan.csv
+!output/trading_assistant/latest_plan.json
+!output/trading_assistant/.gitkeep

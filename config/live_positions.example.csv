@@ -1,0 +1,2 @@
+ticker,name,buy_date,buy_time,buy_price,shares,target_price,hard_stop_price,trailing_stop_pct,highest_price,status,notes
+300000,示例股票,2026-07-02,09:50,10.00,1000,10.70,9.60,3.00,10.20,open,复制为 live_positions.csv 后填写真实持仓

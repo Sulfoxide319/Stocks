@@ -36,6 +36,34 @@ The latest advice is written to:
 - `output/live_advice/latest.md`
 - `output/live_advice/latest.csv`
 
+## Local Trading Assistant
+
+Run one local scan:
+
+```powershell
+python local_trading_assistant.py --once
+```
+
+Run the full local assistant:
+
+```powershell
+python local_trading_assistant.py --beep
+```
+
+Schedule:
+
+- Opening focus: `09:20-09:45`
+- Intraday buy/sell checks: every 2 minutes in `09:45-11:30` and `13:00-14:45`
+- Pre-close review: `14:45-15:05`
+
+The latest plan is written to:
+
+- `output/trading_assistant/latest_plan.md`
+- `output/trading_assistant/latest_plan.csv`
+- `output/trading_assistant/latest_plan.json`
+
+To let the assistant evaluate sell rules, copy `config/live_positions.example.csv` to `config/live_positions.csv` and fill your real/paper positions. `config/live_positions.csv` is ignored by git.
+
 ## Publish Latest Advice To GitHub
 
 Commit and push the latest generated advice after each scan:
