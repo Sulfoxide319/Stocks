@@ -3,6 +3,8 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 set "APP_DIR=%SCRIPT_DIR%"
+set "INSTALL_DIR=%SCRIPT_DIR%"
+if "%INSTALL_DIR:~-1%"=="\" set "INSTALL_DIR=%INSTALL_DIR:~0,-1%"
 
 if not exist "%APP_DIR%trading_assistant_app.py" (
   if exist "%SCRIPT_DIR%app\trading_assistant_app.py" (
@@ -11,7 +13,7 @@ if not exist "%APP_DIR%trading_assistant_app.py" (
 )
 
 if exist "%SCRIPT_DIR%Update-StocksTool.ps1" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Update-StocksTool.ps1" -InstallDir "%SCRIPT_DIR%" -Quiet
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Update-StocksTool.ps1" -InstallDir "%INSTALL_DIR%" -Quiet
 )
 
 if exist "%SCRIPT_DIR%trading_assistant_app.py" (

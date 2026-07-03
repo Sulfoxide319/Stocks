@@ -7,6 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$InstallDir = $InstallDir.Trim().Trim('"').TrimEnd("\")
+
 function Write-UpdateLog {
     param([string]$Message)
     if (-not $Quiet) {
