@@ -587,6 +587,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("扫描中")
         self.scan_button.setEnabled(False)
         self.scan_worker = ScanWorker(self.root, phase, self.db_path)
+        self.scan_worker.started.connect(lambda: self.on_scan_progress(6, "扫描线程已启动"))
         self.scan_worker.progress.connect(self.on_scan_progress)
         self.scan_worker.log.connect(self.append_log)
         self.scan_worker.finished_payload.connect(self.on_scan_done)

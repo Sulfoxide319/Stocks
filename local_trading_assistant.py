@@ -152,6 +152,40 @@ def run_command(command: list[str], cwd: Path, check: bool = True) -> subprocess
     return subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=check)
 
 
+def run_command_with_heartbeat(
+    command: list[str],
+    cwd: Path,
+    heartbeat_message: str,
+    timeout_seconds: int = 300,
+    heartbeat_seconds: int = 5,
+) -> subprocess.CompletedProcess[str]:
+    started = time.monotonic()
+    last_heartbeat = started
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    while process.poll() is None:
+        now = time.monotonic()
+        elapsed = int(now - started)
+        if elapsed >= timeout_seconds:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(command, timeout_seconds, output=stdout, stderr=stderr)
+        if now - last_heartbeat >= heartbeat_seconds:
+            emit_progress(30, f"{heartbeat_message}，已运行 {elapsed} 秒")
+            last_heartbeat = now
+        time.sleep(0.2)
+    stdout, stderr = process.communicate()
+    result = subprocess.CompletedProcess(command, int(process.returncode or 0), stdout, stderr)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, command, output=stdout, stderr=stderr)
+    return result
+
+
 def emit_progress(percent: int, message: str) -> None:
     print(f"SCAN_PROGRESS|{percent}|{message}", flush=True)
 
@@ -180,7 +214,7 @@ def run_monitor(args: argparse.Namespace, cwd: Path, today: dt.date, phase: str,
         *args.extra_monitor_arg,
     ]
     emit_progress(25, "运行候选股扫描")
-    result = run_command(command, cwd)
+    result = run_command_with_heartbeat(command, cwd, "候选股扫描运行中")
     if result.stdout.strip():
         print(result.stdout.strip())
     if result.stderr.strip():
