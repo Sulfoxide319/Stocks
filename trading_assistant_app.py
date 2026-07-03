@@ -45,6 +45,7 @@ COLORS = {
 class DummyArgs:
     intraday_interval_seconds = 120
     focus_interval_seconds = 300
+    postclose_interval_seconds = 900
 
 
 class TradingAssistantApp:
@@ -80,6 +81,28 @@ class TradingAssistantApp:
         self.configure_style()
         self.build_ui()
         self.root.after(250, self.process_queue)
+
+    def place_trade_popup(self, popup: Toplevel) -> None:
+        self.root.update_idletasks()
+        screen_w = max(1, self.root.winfo_screenwidth())
+        screen_h = max(1, self.root.winfo_screenheight())
+        max_w = max(360, screen_w - 96)
+        max_h = max(300, screen_h - 120)
+        width = min(max(820, int(screen_w * 0.64)), max_w)
+        height = min(max(460, int(screen_h * 0.52)), max_h)
+
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = max(1, self.root.winfo_width())
+        root_h = max(1, self.root.winfo_height())
+        x = root_x + (root_w - width) // 2
+        y = root_y + (root_h - height) // 2
+        x = min(max(24, x), max(24, screen_w - width - 24))
+        y = min(max(24, y), max(24, screen_h - height - 48))
+
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        popup.minsize(min(720, width), min(380, height))
+        popup.maxsize(max_w, max_h)
 
     def configure_style(self) -> None:
         style = ttk.Style()
@@ -461,8 +484,9 @@ class TradingAssistantApp:
             pass
         popup = Toplevel(self.root)
         popup.title("交易动作提示")
-        popup.geometry("760x420")
         popup.configure(bg=COLORS["bg"])
+        self.place_trade_popup(popup)
+        popup.transient(self.root)
         popup.attributes("-topmost", True)
         popup.lift()
 
@@ -470,7 +494,11 @@ class TradingAssistantApp:
         panel.pack(fill=BOTH, expand=True, padx=12, pady=12)
         ttk.Label(panel, text="出现需要处理的交易动作", style="Title.TLabel").pack(anchor="w")
         ttk.Label(panel, text="请按你的券商交易界面确认价格和可卖数量，本程序只给建议，不自动下单。", style="Subtle.TLabel").pack(anchor="w", pady=(4, 10))
-        tree = ttk.Treeview(panel, columns=("side", "action", "ticker", "name", "latest", "reason"), show="headings", height=8)
+        table_frame = ttk.Frame(panel, style="Panel.TFrame")
+        table_frame.pack(fill=BOTH, expand=True, pady=(0, 12))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(table_frame, columns=("side", "action", "ticker", "name", "latest", "reason"), show="headings", height=8)
         for column, label, width in [
             ("side", "方向", 64),
             ("action", "动作", 136),
@@ -483,14 +511,20 @@ class TradingAssistantApp:
             tree.column(column, width=width, anchor="e" if column == "latest" else "w", stretch=column == "reason")
         tree.tag_configure("urgent", background=COLORS["sell_bg"], foreground=COLORS["sell"])
         tree.tag_configure("buy", background=COLORS["buy_bg"], foreground=COLORS["buy"])
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
         for item in new_items:
             tag = "buy" if item.get("side") == "买入" else "urgent"
             tree.insert("", END, values=(item.get("side", ""), item.get("action", ""), item.get("ticker", ""), item.get("name", ""), self.fmt(item.get("latest_price")), item.get("reason", "")), tags=(tag,))
-        tree.pack(fill=BOTH, expand=True, pady=(0, 12))
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
         buttons = ttk.Frame(panel, style="Panel.TFrame")
         buttons.pack(fill=X)
         ttk.Button(buttons, text="打开最新计划", command=self.open_latest_plan, style="Primary.TButton").pack(side=LEFT)
         ttk.Button(buttons, text="我知道了", command=popup.destroy, style="Quiet.TButton").pack(side=RIGHT)
+        popup.focus_force()
 
     def on_select(self, _event: object) -> None:
         tree = self.root.focus_get()
