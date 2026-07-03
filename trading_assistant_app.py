@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, X, Y, Button, Frame, Label, StringVar, Tk, Toplevel, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, X, Y, Canvas, Frame, Label, StringVar, Tk, Toplevel, messagebox
 from tkinter import ttk
 
 from dependency_bootstrap import ensure_project_dependencies
@@ -65,13 +65,19 @@ class TradingAssistantApp:
         self.update_in_progress = False
         self.alerted_keys: set[str] = set()
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.action_buttons: dict[str, ttk.Button] = {}
+        self.tree_empty_labels: dict[ttk.Treeview, Label] = {}
+        self.tree_xscrollbars: list[ttk.Scrollbar] = []
+        self.detail_frame: ttk.Frame | None = None
+        self.detail_body_label: Label | None = None
 
         self.status = StringVar(value="待机")
         self.phase_text = StringVar(value="阶段：-")
         self.last_scan = StringVar(value="上次扫描：-")
         self.next_scan = StringVar(value="下一次扫描：-")
         self.version_text = StringVar(value=f"版本：v{self.version}")
-        self.update_event = StringVar(value=f"更新事件：当前 v{self.version}，可手动检查 GitHub Release。")
+        self.update_event = StringVar(value=f"更新：当前 v{self.version}")
+        self.update_log = StringVar(value="更新日志：可手动检查 GitHub Release。")
         self.buy_count = StringVar(value="0")
         self.sell_count = StringVar(value="0")
         self.watch_count = StringVar(value="0")
@@ -153,83 +159,137 @@ class TradingAssistantApp:
 
     def build_ui(self) -> None:
         outer = Frame(self.root, bg=COLORS["bg"])
-        outer.pack(fill=BOTH, expand=True, padx=14, pady=14)
+        outer.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
 
         self.build_header(outer)
         body = Frame(outer, bg=COLORS["bg"])
-        body.pack(fill=BOTH, expand=True, pady=(12, 0))
+        body.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        body.columnconfigure(0, minsize=282)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
 
         sidebar = ttk.Frame(body, style="Panel.TFrame", padding=14)
-        sidebar.pack(side=LEFT, fill=Y, padx=(0, 12))
-        sidebar.configure(width=270)
-        sidebar.pack_propagate(False)
+        sidebar.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        sidebar.configure(width=282)
+        sidebar.grid_propagate(False)
         self.build_sidebar(sidebar)
 
         main = Frame(body, bg=COLORS["bg"])
-        main.pack(side=LEFT, fill=BOTH, expand=True)
+        main.grid(row=0, column=1, sticky="nsew")
         self.build_main(main)
 
     def build_header(self, parent: Frame) -> None:
         header = ttk.Frame(parent, style="Panel.TFrame", padding=16)
-        header.pack(fill=X)
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
         left = ttk.Frame(header, style="Panel.TFrame")
-        left.pack(side=LEFT, fill=X, expand=True)
+        left.grid(row=0, column=0, sticky="ew")
         ttk.Label(left, text="A股短线交易助手", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(left, text="本地 2 分钟扫描，只有买卖动作才弹窗；夜间再整理推 GitHub。", style="Subtle.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(left, text=f"本地 2 分钟扫描，只有买卖动作才弹窗；夜间再整理推 GitHub。  v{self.version}", style="Subtle.TLabel").pack(anchor="w", pady=(4, 0))
 
         right = ttk.Frame(header, style="Panel.TFrame")
-        right.pack(side=RIGHT)
+        right.grid(row=0, column=1, sticky="e", padx=(12, 0))
         ttk.Button(right, text="启动", command=self.start, style="Primary.TButton").pack(side=LEFT, padx=(0, 8))
         ttk.Button(right, text="停止", command=self.stop, style="Quiet.TButton").pack(side=LEFT, padx=(0, 8))
         ttk.Button(right, text="立即扫描", command=self.run_now, style="Quiet.TButton").pack(side=LEFT)
 
     def build_sidebar(self, parent: ttk.Frame) -> None:
-        self.status_badge = Label(parent, textvariable=self.status, bg=COLORS["blue_bg"], fg=COLORS["blue"], font=("Microsoft YaHei UI", 12, "bold"), padx=12, pady=8)
-        self.status_badge.pack(fill=X)
-        ttk.Label(parent, textvariable=self.phase_text, style="Subtle.TLabel").pack(anchor="w", pady=(14, 0))
-        ttk.Label(parent, textvariable=self.last_scan, style="Subtle.TLabel").pack(anchor="w", pady=(6, 0))
-        ttk.Label(parent, textvariable=self.next_scan, style="Subtle.TLabel").pack(anchor="w", pady=(6, 16))
-        ttk.Label(parent, textvariable=self.version_text, style="Subtle.TLabel").pack(anchor="w", pady=(0, 6))
-        Label(parent, textvariable=self.update_event, bg=COLORS["panel"], fg=COLORS["muted"], justify=LEFT, anchor="w", wraplength=230, font=("Microsoft YaHei UI", 9)).pack(fill=X, pady=(0, 14))
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(3, weight=1)
+        self.build_status_panel(parent)
+        self.build_metrics_panel(parent)
+        self.build_actions_panel(parent)
+        self.build_info_panel(parent)
 
+    def build_status_panel(self, parent: ttk.Frame) -> None:
+        panel = ttk.Frame(parent, style="Panel.TFrame")
+        panel.grid(row=0, column=0, sticky="ew")
+        panel.columnconfigure(0, weight=1)
+        self.status_badge = Label(panel, textvariable=self.status, bg=COLORS["blue_bg"], fg=COLORS["blue"], font=("Microsoft YaHei UI", 12, "bold"), padx=12, pady=9)
+        self.status_badge.grid(row=0, column=0, sticky="ew")
+        for row, variable in enumerate((self.phase_text, self.last_scan, self.next_scan, self.update_event), start=1):
+            ttk.Label(panel, textvariable=variable, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", pady=(8 if row == 1 else 4, 0))
+
+    def build_metrics_panel(self, parent: ttk.Frame) -> None:
         metrics = ttk.Frame(parent, style="Panel.TFrame")
-        metrics.pack(fill=X, pady=(0, 12))
+        metrics.grid(row=1, column=0, sticky="ew", pady=(14, 8))
+        metrics.columnconfigure(0, weight=1)
+        metrics.columnconfigure(1, weight=1)
         self.metric_card(metrics, "买入触发", self.buy_count, COLORS["buy"], 0, 0)
         self.metric_card(metrics, "卖出处理", self.sell_count, COLORS["sell"], 0, 1)
         self.metric_card(metrics, "关注等待", self.watch_count, COLORS["blue"], 1, 0)
         self.metric_card(metrics, "T+1锁定", self.t1_count, COLORS["warn"], 1, 1)
 
+    def build_actions_panel(self, parent: ttk.Frame) -> None:
         actions = ttk.LabelFrame(parent, text="操作", padding=10)
-        actions.pack(fill=X, pady=(8, 12))
-        ttk.Button(actions, text="打开最新计划", command=self.open_latest_plan, style="Quiet.TButton").pack(fill=X, pady=(0, 8))
-        ttk.Button(actions, text="编辑持仓 CSV", command=self.open_positions, style="Quiet.TButton").pack(fill=X, pady=(0, 8))
-        self.update_button = ttk.Button(actions, text="检查更新", command=self.check_update, style="Quiet.TButton")
-        self.update_button.pack(fill=X, pady=(0, 8))
-        ttk.Button(actions, text="测试弹窗", command=self.test_alert, style="Quiet.TButton").pack(fill=X)
+        actions.grid(row=2, column=0, sticky="ew", pady=(2, 10))
+        actions.columnconfigure(0, weight=1)
+        button_specs = [
+            ("open_latest", "打开最新计划", self.open_latest_plan),
+            ("positions", "编辑持仓 CSV", self.open_positions),
+            ("update", "检查更新", self.check_update),
+            ("test_alert", "测试弹窗", self.test_alert),
+        ]
+        for row, (key, text, command) in enumerate(button_specs):
+            button = ttk.Button(actions, text=text, command=command, style="Quiet.TButton")
+            button.grid(row=row, column=0, sticky="ew", pady=(0, 8 if row < len(button_specs) - 1 else 0), ipady=4)
+            self.action_buttons[key] = button
+        self.update_button = self.action_buttons["update"]
 
-        rules = ttk.LabelFrame(parent, text="盘中规则", padding=10)
-        rules.pack(fill=BOTH, expand=True)
+    def build_info_panel(self, parent: ttk.Frame) -> None:
+        info = ttk.LabelFrame(parent, text="规则与更新日志", padding=0)
+        info.grid(row=3, column=0, sticky="nsew")
+        info.columnconfigure(0, weight=1)
+        info.rowconfigure(0, weight=1)
+
+        canvas = Canvas(info, bg=COLORS["panel"], highlightthickness=0, borderwidth=0)
+        yscroll = ttk.Scrollbar(info, orient="vertical", command=canvas.yview)
+        content = ttk.Frame(canvas, style="Panel.TFrame", padding=10)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        canvas.configure(yscrollcommand=yscroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+
         Label(
-            rules,
+            content,
             text="09:20-09:45 关注池\n09:45-11:30 2分钟买卖\n13:00-14:45 2分钟买卖\n14:45-15:05 收盘前复核\n\nT+1：当天买入不提示卖出\n冷却行情：不硬开新仓",
             bg=COLORS["panel"],
             fg=COLORS["muted"],
             justify=LEFT,
             anchor="nw",
             font=("Microsoft YaHei UI", 9),
-            pady=4,
-        ).pack(fill=BOTH, expand=True)
+        ).pack(fill=X, anchor="w")
+        Label(
+            content,
+            textvariable=self.update_log,
+            bg=COLORS["panel"],
+            fg=COLORS["muted"],
+            justify=LEFT,
+            anchor="nw",
+            wraplength=230,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill=X, anchor="w", pady=(12, 0))
 
     def metric_card(self, parent: ttk.Frame, label: str, value: StringVar, color: str, row: int, column: int) -> None:
         card = Frame(parent, bg=COLORS["panel"], highlightbackground=COLORS["line"], highlightthickness=1)
         card.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0), pady=(0, 8))
         parent.columnconfigure(column, weight=1)
-        Label(card, textvariable=value, bg=COLORS["panel"], fg=color, font=("Consolas", 22, "bold")).pack(anchor="w", padx=10, pady=(8, 0))
+        parent.rowconfigure(row, minsize=64)
+        Label(card, textvariable=value, bg=COLORS["panel"], fg=color, font=("Consolas", 20, "bold")).pack(anchor="w", padx=10, pady=(6, 0))
         Label(card, text=label, bg=COLORS["panel"], fg=COLORS["muted"], font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=10, pady=(0, 8))
 
     def build_main(self, parent: Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
         self.notebook = ttk.Notebook(parent)
-        self.notebook.pack(fill=BOTH, expand=True)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
 
         self.all_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=10)
         self.buy_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=10)
@@ -243,11 +303,19 @@ class TradingAssistantApp:
         self.sell_tree = self.create_tree(self.sell_tab)
 
         detail = ttk.Frame(parent, style="Panel.TFrame", padding=14)
-        detail.pack(fill=X, pady=(12, 0))
-        ttk.Label(detail, textvariable=self.detail_title, style="Title.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
-        Label(detail, textvariable=self.detail_body, bg=COLORS["panel"], fg=COLORS["muted"], justify=LEFT, anchor="w", wraplength=820).pack(fill=X, pady=(6, 0))
+        detail.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        detail.grid_propagate(False)
+        detail.configure(height=96)
+        detail.columnconfigure(0, weight=1)
+        self.detail_frame = detail
+        ttk.Label(detail, textvariable=self.detail_title, style="Title.TLabel", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        self.detail_body_label = Label(detail, textvariable=self.detail_body, bg=COLORS["panel"], fg=COLORS["muted"], justify=LEFT, anchor="nw", wraplength=820)
+        self.detail_body_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        detail.bind("<Configure>", self.on_detail_resize)
 
     def create_tree(self, parent: ttk.Frame) -> ttk.Treeview:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
         columns = ("side", "action", "ticker", "name", "latest", "trigger", "target", "stop", "pnl", "edge", "reason")
         tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
         headings = {
@@ -286,9 +354,22 @@ class TradingAssistantApp:
         tree.tag_configure("watch", background=COLORS["panel"], foreground=COLORS["ink"])
         tree.bind("<<TreeviewSelect>>", self.on_select)
         yscroll = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=yscroll.set)
-        tree.pack(side=LEFT, fill=BOTH, expand=True)
-        yscroll.pack(side=RIGHT, fill=Y)
+        xscroll = ttk.Scrollbar(parent, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        empty = Label(
+            parent,
+            text="暂无扫描结果\n点击“立即扫描”开始",
+            bg=COLORS["panel"],
+            fg=COLORS["muted"],
+            justify="center",
+            font=("Microsoft YaHei UI", 11),
+        )
+        empty.place(relx=0.5, rely=0.5, anchor="center")
+        self.tree_empty_labels[tree] = empty
+        self.tree_xscrollbars.append(xscroll)
         return tree
 
     def start(self) -> None:
@@ -442,9 +523,23 @@ class TradingAssistantApp:
         self.sell_count.set(str(sell_action))
         self.watch_count.set(str(watch))
         self.t1_count.set(str(t1))
+        self.update_empty_states()
         if not buy_items and not sell_items:
             self.detail_title.set("没有可展示数据")
             self.detail_body.set("请先点击“立即扫描”，或在交易窗口内启动自动扫描。")
+
+    def update_empty_states(self) -> None:
+        for tree, label in self.tree_empty_labels.items():
+            if tree.get_children():
+                label.place_forget()
+            else:
+                label.place(relx=0.5, rely=0.5, anchor="center")
+
+    def on_detail_resize(self, event: object) -> None:
+        if self.detail_body_label is None:
+            return
+        width = getattr(event, "width", 820)
+        self.detail_body_label.configure(wraplength=max(240, int(width) - 32))
 
     def row_values(self, side: str, row: dict[str, object]) -> tuple[tuple[object, ...], str]:
         action = str(row.get("action", ""))
@@ -604,19 +699,24 @@ class TradingAssistantApp:
                 return candidate
         return None
 
+    def set_update_event(self, summary: str, detail: str | None = None) -> None:
+        self.update_event.set(f"更新：{summary}")
+        if detail is not None:
+            self.update_log.set(f"更新日志：{detail}")
+
     def check_update(self) -> None:
         if self.update_in_progress:
             return
         updater = self.find_updater()
         if updater is None:
-            self.update_event.set("更新事件：未找到 Update-StocksTool.ps1，请使用新版安装包。")
+            self.set_update_event("未找到脚本", "未找到 Update-StocksTool.ps1，请使用新版安装包。")
             return
         if (self.install_dir / ".git").exists() and "installer" in updater.parts:
-            self.update_event.set("更新事件：当前是源码目录，请用 git pull 或发布包更新，避免覆盖工作区。")
+            self.set_update_event("源码目录", "当前是源码目录，请用 git pull 或发布包更新，避免覆盖工作区。")
             return
         self.update_in_progress = True
         self.update_button.state(["disabled"])
-        self.update_event.set("更新事件：正在检查 GitHub Release...")
+        self.set_update_event("正在检查", "正在检查 GitHub Release...")
         thread = threading.Thread(target=self.update_worker, args=(updater,), daemon=True)
         thread.start()
 
@@ -659,10 +759,11 @@ class TradingAssistantApp:
         self.version_text.set(f"版本：v{self.version}")
         if returncode == 0:
             if message.lower().startswith("updated to"):
-                message = f"{message}，重启后使用新版。"
-            self.update_event.set(f"更新事件：{message}")
+                self.set_update_event("已更新，需重启", f"{message}，重启后使用新版。")
+            else:
+                self.set_update_event("检查完成", message)
         else:
-            self.update_event.set(f"更新事件：更新失败：{message}")
+            self.set_update_event("更新失败", message)
 
     def test_alert(self) -> None:
         self.show_trade_alert(
