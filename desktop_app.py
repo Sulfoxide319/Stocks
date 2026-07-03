@@ -32,7 +32,7 @@ from app_storage import (
 
 
 try:
-    from PySide6.QtCore import Qt, QThread, Signal
+    from PySide6.QtCore import Qt, QThread, QTimer, Signal
     from PySide6.QtGui import QAction, QFont
     from PySide6.QtWidgets import (
         QApplication,
@@ -228,11 +228,14 @@ class ScanWorker(QThread):
         self.db_path = db_path
 
     def run(self) -> None:
+        self.progress.emit(7, "准备加载扫描模块")
         import local_trading_assistant
 
+        self.progress.emit(8, "扫描模块已加载")
         previous_emit = local_trading_assistant.emit_progress
         local_trading_assistant.emit_progress = lambda percent, message: self.progress.emit(int(percent), str(message))
         try:
+            self.progress.emit(9, "准备扫描参数")
             out_dir = app_data_dir() / "output" / "trading_assistant"
             argv = [
                 "--once",
@@ -250,7 +253,9 @@ class ScanWorker(QThread):
                 argv.extend(["--python", sys.executable, "--monitor-script", "--run-monitor"])
             args = build_arg_parser().parse_args(argv)
             self.log.emit(f"开始 {self.phase} 扫描")
+            self.progress.emit(10, "进入扫描流程")
             run_once(args, self.root)
+            self.progress.emit(97, "读取最新扫描结果")
             with connect(self.db_path) as conn:
                 payload = load_latest_snapshot(conn)
             self.finished_payload.emit(payload)
@@ -279,6 +284,12 @@ class MainWindow(QMainWindow):
         self.selected_position_id: int | None = None
         self.scan_worker: ScanWorker | None = None
         self.update_worker: UpdateWorker | None = None
+        self.scan_started_at: dt.datetime | None = None
+        self.scan_stage_text = ""
+        self.scan_last_heartbeat_seconds = 0
+        self.scan_timer = QTimer(self)
+        self.scan_timer.setInterval(10_000)
+        self.scan_timer.timeout.connect(self.on_scan_heartbeat)
         with connect(self.db_path) as conn:
             self.migration_notes = migrate_legacy_files(conn, self.root)
         self.setWindowTitle("A股短线交易助手")
@@ -593,6 +604,10 @@ class MainWindow(QMainWindow):
         self.progress.setValue(5)
         self.status_label.setText("扫描中")
         self.scan_button.setEnabled(False)
+        self.scan_started_at = dt.datetime.now()
+        self.scan_stage_text = "启动扫描线程"
+        self.scan_last_heartbeat_seconds = 0
+        self.scan_timer.start()
         self.scan_worker = ScanWorker(self.root, phase, self.db_path)
         self.scan_worker.started.connect(lambda: self.on_scan_progress(6, "扫描线程已启动"))
         self.scan_worker.progress.connect(self.on_scan_progress)
@@ -603,10 +618,27 @@ class MainWindow(QMainWindow):
 
     def on_scan_progress(self, percent: int, message: str) -> None:
         self.progress.setValue(percent)
+        self.scan_stage_text = message
         self.append_log(message)
+
+    def on_scan_heartbeat(self) -> None:
+        if not self.scan_worker or not self.scan_worker.isRunning() or not self.scan_started_at:
+            self.scan_timer.stop()
+            return
+        elapsed = int((dt.datetime.now() - self.scan_started_at).total_seconds())
+        if elapsed <= self.scan_last_heartbeat_seconds:
+            return
+        self.scan_last_heartbeat_seconds = elapsed
+        if self.progress.value() < 25:
+            self.progress.setValue(max(self.progress.value(), min(24, 6 + elapsed // 10)))
+        stage = self.scan_stage_text or "等待后台扫描响应"
+        self.status_label.setText(f"扫描中（{elapsed} 秒）")
+        self.append_log(f"扫描仍在运行：已 {elapsed} 秒，当前阶段：{stage}")
 
     def on_scan_done(self, payload: dict[str, Any]) -> None:
         self.scan_button.setEnabled(True)
+        self.scan_timer.stop()
+        self.scan_started_at = None
         self.progress.setValue(100)
         self.status_label.setText("扫描完成")
         if payload:
@@ -617,6 +649,8 @@ class MainWindow(QMainWindow):
 
     def on_scan_failed(self, message: str) -> None:
         self.scan_button.setEnabled(True)
+        self.scan_timer.stop()
+        self.scan_started_at = None
         self.status_label.setText("扫描失败")
         self.append_log(f"扫描失败：{message}")
         QMessageBox.critical(self, "扫描失败", message[:3000])

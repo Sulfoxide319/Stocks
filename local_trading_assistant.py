@@ -176,7 +176,8 @@ def run_command_with_heartbeat(
             stdout, stderr = process.communicate()
             raise subprocess.TimeoutExpired(command, timeout_seconds, output=stdout, stderr=stderr)
         if now - last_heartbeat >= heartbeat_seconds:
-            emit_progress(30, f"{heartbeat_message}，已运行 {elapsed} 秒")
+            percent = min(54, 30 + int(elapsed / max(timeout_seconds, 1) * 24))
+            emit_progress(percent, f"{heartbeat_message}，已运行 {elapsed} 秒（最多等待 {timeout_seconds} 秒）")
             last_heartbeat = now
         time.sleep(0.2)
     stdout, stderr = process.communicate()
@@ -505,22 +506,26 @@ def git_publish(cwd: Path, args: argparse.Namespace, files: list[Path]) -> None:
 
 
 def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
+    emit_progress(10, "开始准备扫描")
     now = dt.datetime.now()
     today = parse_date(args.today) if args.today else now.date()
     phase = phase_for_time(now) if args.phase == "auto" else args.phase
     if phase == "closed":
         phase = "postclose" if args.once else "closed"
     out_dir = (cwd / args.out_dir).resolve()
+    emit_progress(11, "准备输出目录")
     out_dir.mkdir(parents=True, exist_ok=True)
     app_db_path = Path(args.app_db).resolve() if args.app_db else default_db_path()
     positions_path = cwd / args.positions
     if args.use_app_db:
+        emit_progress(12, "读取本地持仓数据")
         positions_path = out_dir / "runtime_positions.csv"
         with connect_app_storage(app_db_path) as conn:
             export_open_positions_csv(conn, positions_path)
-    emit_progress(10, f"准备 {phase} 扫描")
+        emit_progress(13, "本地持仓数据已准备")
+    emit_progress(20, f"准备 {phase} 扫描")
     if args.git_pull_before_scan:
-        emit_progress(15, "同步 Git 最新结果")
+        emit_progress(21, "同步 Git 最新结果")
         run_command(["git", "pull", "--ff-only"], cwd, check=False)
     monitor_report, monitor_csv, mode = run_monitor(args, cwd, today, phase, out_dir)
     emit_progress(62, "读取候选股结果")
