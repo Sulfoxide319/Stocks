@@ -12,6 +12,7 @@ import sys
 import threading
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, X, Y, Canvas, Frame, IntVar, Label, StringVar, Tk, Toplevel, messagebox
+from tkinter import font as tkfont
 from tkinter import ttk
 
 from dependency_bootstrap import ensure_project_dependencies
@@ -23,6 +24,9 @@ from local_trading_assistant import next_sleep_seconds, phase_for_time
 
 URGENT_SELL_ACTIONS = {"SELL_NOW", "TAKE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"}
 TRADE_ACTIONS = URGENT_SELL_ACTIONS | {"BUY_NOW"}
+FONT_MIN = 8
+FONT_MAX = 16
+FONT_DEFAULT = 10
 
 COLORS = {
     "bg": "#f5f7fb",
@@ -57,8 +61,10 @@ class TradingAssistantApp:
         self.latest_md = self.out_dir / "latest_plan.md"
         self.positions_csv = self.cwd / "config" / "live_positions.csv"
         self.positions_example = self.cwd / "config" / "live_positions.example.csv"
+        self.ui_settings_path = self.cwd / "config" / "ui_settings.json"
         self.install_dir = self.resolve_install_dir()
         self.version = self.read_app_version()
+        self.font_size = self.load_ui_settings().get("font_size", FONT_DEFAULT)
 
         self.running = False
         self.scan_in_progress = False
@@ -71,6 +77,8 @@ class TradingAssistantApp:
         self.tree_xscrollbars: list[ttk.Scrollbar] = []
         self.detail_frame: ttk.Frame | None = None
         self.detail_body_label: Label | None = None
+        self.sidebar: ttk.Frame | None = None
+        self.fonts: dict[str, tkfont.Font] = {}
 
         self.status = StringVar(value="待机")
         self.phase_text = StringVar(value="阶段：-")
@@ -79,6 +87,7 @@ class TradingAssistantApp:
         self.scan_progress_text = StringVar(value="扫描进度：待开始")
         self.scan_progress = IntVar(value=0)
         self.scan_log_text = StringVar(value="扫描日志：暂无。")
+        self.font_size_text = StringVar(value=f"字号 {self.font_size}")
         self.version_text = StringVar(value=f"版本：v{self.version}")
         self.update_event = StringVar(value=f"更新：当前 v{self.version}")
         self.update_log = StringVar(value="更新日志：可手动检查 GitHub Release。")
@@ -135,31 +144,98 @@ class TradingAssistantApp:
                 return text.lstrip("v") or "0.0.0"
         return "0.0.0"
 
+    def load_ui_settings(self) -> dict[str, int]:
+        try:
+            if self.ui_settings_path.exists():
+                data = json.loads(self.ui_settings_path.read_text(encoding="utf-8"))
+                font_size = int(data.get("font_size", FONT_DEFAULT))
+                return {"font_size": self.clamp_font_size(font_size)}
+        except Exception:
+            pass
+        return {"font_size": FONT_DEFAULT}
+
+    def save_ui_settings(self) -> None:
+        try:
+            self.ui_settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self.ui_settings_path.write_text(json.dumps({"font_size": self.font_size}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def clamp_font_size(self, value: int) -> int:
+        return max(FONT_MIN, min(FONT_MAX, value))
+
+    def configure_fonts(self) -> None:
+        size = self.clamp_font_size(self.font_size)
+        specs = {
+            "base": ("Microsoft YaHei UI", size, "normal"),
+            "subtle": ("Microsoft YaHei UI", max(FONT_MIN, size - 1), "normal"),
+            "title": ("Microsoft YaHei UI", size + 8, "bold"),
+            "button": ("Microsoft YaHei UI", size, "normal"),
+            "button_bold": ("Microsoft YaHei UI", size, "bold"),
+            "heading": ("Microsoft YaHei UI", max(FONT_MIN, size - 1), "bold"),
+            "status": ("Microsoft YaHei UI", size + 2, "bold"),
+            "detail_title": ("Microsoft YaHei UI", size + 2, "bold"),
+            "empty": ("Microsoft YaHei UI", size + 1, "normal"),
+            "metric": ("Consolas", size + 10, "bold"),
+            "mono": ("Consolas", size, "normal"),
+            "mono_small": ("Consolas", max(FONT_MIN, size - 1), "normal"),
+        }
+        for key, (family, font_size, weight) in specs.items():
+            if key not in self.fonts:
+                self.fonts[key] = tkfont.Font(root=self.root, family=family, size=font_size, weight=weight)
+            else:
+                self.fonts[key].configure(family=family, size=font_size, weight=weight)
+
     def configure_style(self) -> None:
         style = ttk.Style()
         try:
             style.theme_use("clam")
         except Exception:
             pass
-        base_font = ("Microsoft YaHei UI", 10)
-        mono_font = ("Consolas", 10)
-        style.configure(".", font=base_font, background=COLORS["bg"], foreground=COLORS["ink"])
+        self.style = style
+        self.configure_fonts()
+        style.configure(".", font=self.fonts["base"], background=COLORS["bg"], foreground=COLORS["ink"])
         style.configure("Panel.TFrame", background=COLORS["panel"])
         style.configure("Muted.TFrame", background=COLORS["muted_panel"])
-        style.configure("Title.TLabel", background=COLORS["panel"], foreground=COLORS["ink"], font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("Subtle.TLabel", background=COLORS["panel"], foreground=COLORS["muted"], font=("Microsoft YaHei UI", 9))
-        style.configure("Metric.TLabel", background=COLORS["panel"], foreground=COLORS["ink"], font=("Consolas", 22, "bold"))
-        style.configure("MetricCaption.TLabel", background=COLORS["panel"], foreground=COLORS["muted"], font=("Microsoft YaHei UI", 9))
-        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 10, "bold"), padding=(14, 9))
-        style.configure("Quiet.TButton", font=base_font, padding=(12, 8))
-        style.configure("Treeview", font=base_font, rowheight=30, fieldbackground=COLORS["panel"], background=COLORS["panel"], foreground=COLORS["ink"])
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"), padding=(6, 8), background=COLORS["muted_panel"], foreground=COLORS["ink"])
+        style.configure("Title.TLabel", background=COLORS["panel"], foreground=COLORS["ink"], font=self.fonts["title"])
+        style.configure("Subtle.TLabel", background=COLORS["panel"], foreground=COLORS["muted"], font=self.fonts["subtle"])
+        style.configure("Metric.TLabel", background=COLORS["panel"], foreground=COLORS["ink"], font=self.fonts["metric"])
+        style.configure("MetricCaption.TLabel", background=COLORS["panel"], foreground=COLORS["muted"], font=self.fonts["subtle"])
+        style.configure("Primary.TButton", font=self.fonts["button_bold"], padding=(14, 9))
+        style.configure("Quiet.TButton", font=self.fonts["button"], padding=(12, 8))
+        style.configure("Treeview", font=self.fonts["base"], rowheight=max(30, self.font_size * 3), fieldbackground=COLORS["panel"], background=COLORS["panel"], foreground=COLORS["ink"])
+        style.configure("Treeview.Heading", font=self.fonts["heading"], padding=(6, 8), background=COLORS["muted_panel"], foreground=COLORS["ink"])
         style.map("Treeview", background=[("selected", COLORS["blue"])], foreground=[("selected", "#ffffff")])
         style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(16, 9), font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("TNotebook.Tab", padding=(16, 9), font=self.fonts["button_bold"])
         style.configure("TLabelframe", background=COLORS["panel"], bordercolor=COLORS["line"])
-        style.configure("TLabelframe.Label", background=COLORS["panel"], foreground=COLORS["muted"], font=("Microsoft YaHei UI", 9, "bold"))
-        self.mono_font = mono_font
+        style.configure("TLabelframe.Label", background=COLORS["panel"], foreground=COLORS["muted"], font=self.fonts["heading"])
+        self.mono_font = self.fonts["mono"]
+
+    def sidebar_width(self) -> int:
+        return max(282, 282 + (self.font_size - FONT_DEFAULT) * 18)
+
+    def detail_height(self) -> int:
+        return max(96, 96 + (self.font_size - FONT_DEFAULT) * 8)
+
+    def adjust_font_size(self, delta: int) -> None:
+        self.apply_font_size(self.font_size + delta, save=True)
+
+    def apply_font_size(self, value: int, save: bool = False) -> None:
+        next_size = self.clamp_font_size(value)
+        if next_size == self.font_size:
+            self.font_size_text.set(f"字号 {self.font_size}")
+            return
+        self.font_size = next_size
+        self.font_size_text.set(f"字号 {self.font_size}")
+        self.configure_style()
+        if self.sidebar is not None:
+            self.sidebar.configure(width=self.sidebar_width())
+        if self.detail_frame is not None:
+            self.detail_frame.configure(height=self.detail_height())
+        if save:
+            self.save_ui_settings()
+        self.root.update_idletasks()
 
     def build_ui(self) -> None:
         outer = Frame(self.root, bg=COLORS["bg"])
@@ -178,7 +254,8 @@ class TradingAssistantApp:
 
         sidebar = ttk.Frame(body, style="Panel.TFrame", padding=14)
         sidebar.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        sidebar.configure(width=282)
+        self.sidebar = sidebar
+        sidebar.configure(width=self.sidebar_width())
         sidebar.grid_propagate(False)
         self.build_sidebar(sidebar)
 
@@ -213,7 +290,7 @@ class TradingAssistantApp:
         panel = ttk.Frame(parent, style="Panel.TFrame")
         panel.grid(row=0, column=0, sticky="ew")
         panel.columnconfigure(0, weight=1)
-        self.status_badge = Label(panel, textvariable=self.status, bg=COLORS["blue_bg"], fg=COLORS["blue"], font=("Microsoft YaHei UI", 12, "bold"), padx=12, pady=9)
+        self.status_badge = Label(panel, textvariable=self.status, bg=COLORS["blue_bg"], fg=COLORS["blue"], font=self.fonts["status"], padx=12, pady=9)
         self.status_badge.grid(row=0, column=0, sticky="ew")
         for row, variable in enumerate((self.phase_text, self.last_scan, self.next_scan, self.update_event), start=1):
             ttk.Label(panel, textvariable=variable, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", pady=(8 if row == 1 else 4, 0))
@@ -264,6 +341,12 @@ class TradingAssistantApp:
         canvas.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
 
+        font_row = ttk.Frame(content, style="Panel.TFrame")
+        font_row.pack(fill=X, anchor="w", pady=(0, 10))
+        ttk.Button(font_row, text="-", command=lambda: self.adjust_font_size(-1), style="Quiet.TButton", width=3).pack(side=LEFT)
+        ttk.Label(font_row, textvariable=self.font_size_text, style="Subtle.TLabel").pack(side=LEFT, padx=8)
+        ttk.Button(font_row, text="+", command=lambda: self.adjust_font_size(1), style="Quiet.TButton", width=3).pack(side=LEFT)
+
         Label(
             content,
             text="09:20-09:45 关注池\n09:45-11:30 2分钟买卖\n13:00-14:45 2分钟买卖\n14:45-15:05 收盘前复核\n\nT+1：当天买入不提示卖出\n冷却行情：不硬开新仓",
@@ -271,7 +354,7 @@ class TradingAssistantApp:
             fg=COLORS["muted"],
             justify=LEFT,
             anchor="nw",
-            font=("Microsoft YaHei UI", 9),
+            font=self.fonts["subtle"],
         ).pack(fill=X, anchor="w")
         Label(
             content,
@@ -281,7 +364,7 @@ class TradingAssistantApp:
             justify=LEFT,
             anchor="nw",
             wraplength=230,
-            font=("Microsoft YaHei UI", 9),
+            font=self.fonts["subtle"],
         ).pack(fill=X, anchor="w", pady=(12, 0))
         Label(
             content,
@@ -293,7 +376,7 @@ class TradingAssistantApp:
             wraplength=230,
             padx=8,
             pady=7,
-            font=("Consolas", 9),
+            font=self.fonts["mono_small"],
         ).pack(fill=X, anchor="w", pady=(12, 0))
 
     def metric_card(self, parent: ttk.Frame, label: str, value: StringVar, color: str, row: int, column: int) -> None:
@@ -301,8 +384,8 @@ class TradingAssistantApp:
         card.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0), pady=(0, 8))
         parent.columnconfigure(column, weight=1)
         parent.rowconfigure(row, minsize=64)
-        Label(card, textvariable=value, bg=COLORS["panel"], fg=color, font=("Consolas", 20, "bold")).pack(anchor="w", padx=10, pady=(6, 0))
-        Label(card, text=label, bg=COLORS["panel"], fg=COLORS["muted"], font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=10, pady=(0, 8))
+        Label(card, textvariable=value, bg=COLORS["panel"], fg=color, font=self.fonts["metric"]).pack(anchor="w", padx=10, pady=(6, 0))
+        Label(card, text=label, bg=COLORS["panel"], fg=COLORS["muted"], font=self.fonts["subtle"]).pack(anchor="w", padx=10, pady=(0, 8))
 
     def build_main(self, parent: Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -324,11 +407,11 @@ class TradingAssistantApp:
         detail = ttk.Frame(parent, style="Panel.TFrame", padding=14)
         detail.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         detail.grid_propagate(False)
-        detail.configure(height=96)
+        detail.configure(height=self.detail_height())
         detail.columnconfigure(0, weight=1)
         self.detail_frame = detail
-        ttk.Label(detail, textvariable=self.detail_title, style="Title.TLabel", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        self.detail_body_label = Label(detail, textvariable=self.detail_body, bg=COLORS["panel"], fg=COLORS["muted"], justify=LEFT, anchor="nw", wraplength=820)
+        ttk.Label(detail, textvariable=self.detail_title, style="Title.TLabel", font=self.fonts["detail_title"]).grid(row=0, column=0, sticky="w")
+        self.detail_body_label = Label(detail, textvariable=self.detail_body, bg=COLORS["panel"], fg=COLORS["muted"], font=self.fonts["subtle"], justify=LEFT, anchor="nw", wraplength=820)
         self.detail_body_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         detail.bind("<Configure>", self.on_detail_resize)
 
@@ -384,7 +467,7 @@ class TradingAssistantApp:
             bg=COLORS["panel"],
             fg=COLORS["muted"],
             justify="center",
-            font=("Microsoft YaHei UI", 11),
+            font=self.fonts["empty"],
         )
         empty.place(relx=0.5, rely=0.5, anchor="center")
         self.tree_empty_labels[tree] = empty
