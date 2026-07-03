@@ -92,7 +92,14 @@ from local_trading_assistant import build_arg_parser, phase_for_time, run_once
 
 def app_root() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        package_root = exe_dir.parent
+        if exe_dir.name.lower() == "app" and any(
+            (package_root / marker).exists()
+            for marker in ("VERSION", "update_manifest.json", "Start-TradingAssistant.bat")
+        ):
+            return package_root
+        return exe_dir
     return Path(__file__).resolve().parent
 
 
