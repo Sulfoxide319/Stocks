@@ -80,3 +80,32 @@ python local_trading_assistant.py --beep --github-mode commit --git-pull-before-
 ```
 
 This commits only the latest plan files, not your local position file.
+
+## Desktop Popup App
+
+For intraday use, prefer the desktop app:
+
+```powershell
+python trading_assistant_app.py
+```
+
+Or double-click:
+
+```text
+run_trading_app.bat
+```
+
+The app runs scans locally and opens a topmost popup only for actionable trading events:
+
+- `BUY_NOW`
+- `SELL_NOW`
+- `TAKE_PROFIT`
+- `TRAIL_SELL`
+- `VWAP_WEAK_SELL`
+- `PRE_CLOSE_REDUCE`
+
+It does not publish to GitHub during the trading day. Use the nightly publisher after market close:
+
+```powershell
+python nightly_publish.py --pull --branch main
+```

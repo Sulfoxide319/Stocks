@@ -64,6 +64,28 @@ The latest plan is written to:
 
 To let the assistant evaluate sell rules, copy `config/live_positions.example.csv` to `config/live_positions.csv` and fill your real/paper positions. `config/live_positions.csv` is ignored by git.
 
+## Desktop Alert App
+
+Start the local popup app:
+
+```powershell
+python trading_assistant_app.py
+```
+
+Or double-click:
+
+```text
+run_trading_app.bat
+```
+
+The app keeps scanning locally. It pops up only when there is an actionable trading event such as `BUY_NOW`, `SELL_NOW`, `TAKE_PROFIT`, `TRAIL_SELL`, `VWAP_WEAK_SELL`, or `PRE_CLOSE_REDUCE`.
+
+Nightly GitHub publishing is separate from the intraday popup app:
+
+```powershell
+python nightly_publish.py --pull --branch main
+```
+
 ## Publish Latest Advice To GitHub
 
 Commit and push the latest generated advice after each scan:
