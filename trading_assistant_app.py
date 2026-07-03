@@ -104,6 +104,7 @@ class TradingAssistantApp:
         self.root.configure(bg=COLORS["bg"])
         self.configure_style()
         self.build_ui()
+        self.load_cached_scan_result()
         self.root.after(250, self.process_queue)
 
     def place_trade_popup(self, popup: Toplevel) -> None:
@@ -563,7 +564,33 @@ class TradingAssistantApp:
     def read_latest_payload(self) -> dict[str, object]:
         if not self.latest_json.exists():
             return {}
-        return json.loads(self.latest_json.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(self.latest_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self.append_scan_log(f"无法加载上次扫描缓存：{exc}")
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def load_cached_scan_result(self) -> None:
+        payload = self.read_latest_payload()
+        if not payload:
+            return
+        buy = payload.get("buy", [])
+        sell = payload.get("sell", [])
+        buy_items = buy if isinstance(buy, list) else []
+        sell_items = sell if isinstance(sell, list) else []
+        self.render_payload(payload)
+        generated = str(payload.get("generated_at", "-"))
+        phase = str(payload.get("phase", "-"))
+        self.last_scan.set(f"上次扫描：{generated}")
+        self.phase_text.set(f"阶段：{self.phase_label(phase)}")
+        trade_items = self.trade_items(buy_items, sell_items)
+        if trade_items:
+            self.set_status("已加载上次动作", COLORS["warn_bg"], COLORS["warn"])
+        else:
+            self.set_status("已加载上次结果", COLORS["blue_bg"], COLORS["blue"])
+        self.set_scan_progress(100, "已加载上次扫描")
+        self.append_scan_log(f"已加载上次扫描结果：{generated}")
 
     def process_queue(self) -> None:
         try:
