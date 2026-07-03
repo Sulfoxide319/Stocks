@@ -14,9 +14,13 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from dependency_bootstrap import ensure_project_dependencies
+
+ensure_project_dependencies()
+
 import requests
 
-from baostock_intraday import BaoStock5mClient, IntradayBar
+from baostock_intraday import BaoStock5mClient, IntradayBar, missing_requested_dates, missing_specific_dates
 from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols
 from optimize_short_term_strategy import parse_float_list, parse_int_list, parse_str_list
 from optimize_time_weighted_strategy import month_windows, recency_weights
@@ -837,6 +841,7 @@ def result_for_preplanned(
 def prefetch_intraday(
     planned_by_entry: dict[dt.date, list[PlannedTrade]],
     args: argparse.Namespace,
+    price_map: dict[str, list[PriceBar]] | None = None,
 ) -> dict[str, list[IntradayBar]]:
     start_date = parse_date(args.start_date)
     end_date = parse_date(args.end_date)
@@ -844,15 +849,40 @@ def prefetch_intraday(
         raise SystemExit("dates must be YYYY-MM-DD")
     tickers = sorted({planned.ticker for plans in planned_by_entry.values() for planned in plans})
     intraday_map: dict[str, list[IntradayBar]] = {}
+    fetch_end = min(end_date + dt.timedelta(days=args.horizon * 5 + 10), dt.date.today())
+    covered_symbols = 0
+    missing_date_count = 0
+    required_dates_by_ticker: dict[str, list[dt.date]] = {}
+    if price_map:
+        for ticker in tickers:
+            required_dates_by_ticker[ticker] = [
+                bar.date
+                for bar in price_map.get(ticker, [])
+                if start_date <= bar.date <= fetch_end
+            ]
     with BaoStock5mClient(Path(args.baostock_cache_dir)) as client:
         for index, ticker in enumerate(tickers, 1):
             try:
-                intraday_map[ticker] = client.fetch_5m(ticker, start_date, end_date + dt.timedelta(days=args.horizon * 5 + 10))
+                required_dates = required_dates_by_ticker.get(ticker, [])
+                if required_dates:
+                    bars = client.fetch_5m_for_dates(ticker, required_dates)
+                    missing_dates = missing_specific_dates(bars, required_dates)
+                else:
+                    bars = client.fetch_5m(ticker, start_date, fetch_end)
+                    missing_dates = missing_requested_dates(bars, start_date, fetch_end)
+                intraday_map[ticker] = bars
+                if missing_dates:
+                    missing_date_count += len(missing_dates)
+                    preview = ",".join(date_value.isoformat() for date_value in missing_dates[:3])
+                    suffix = "..." if len(missing_dates) > 3 else ""
+                    print(f"warning: baostock 5m coverage gap for {ticker}: {len(missing_dates)} dates ({preview}{suffix})")
+                else:
+                    covered_symbols += 1
             except Exception as exc:
                 print(f"warning: baostock fetch failed for {ticker}: {exc}")
                 intraday_map[ticker] = []
             if index % 10 == 0:
-                print(f"prefetched {index}/{len(tickers)} tickers")
+                print(f"prefetched {index}/{len(tickers)} tickers; full_coverage={covered_symbols}/{index}; missing_dates={missing_date_count}")
     return intraday_map
 
 
@@ -870,7 +900,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worst-month-penalty", type=float, default=0.8)
     parser.add_argument("--horizon", type=int, default=3)
     parser.add_argument("--max-positions", type=int, default=2)
-    parser.add_argument("--min-score", type=float, default=80.0)
+    parser.add_argument("--min-score", type=float, default=90.0)
     parser.add_argument("--selection-mode", choices=["score", "score_quality", "quality", "score_low_heat"], default="score")
     parser.add_argument("--setups", default="EVENT_PLUS_VOLATILITY,VOLUME_BREAKOUT,HIGH_VOLATILITY")
     parser.add_argument("--take-profit", type=float, default=0.10)
@@ -984,7 +1014,7 @@ def main() -> int:
             args.trailing_stop,
         )
         monthly_planned[label] = build_planned_by_entry(rows, price_map, window_end, args)
-    intraday_map = prefetch_intraday(all_planned, args)
+    intraday_map = prefetch_intraday(all_planned, args, price_map)
 
     results: list[dict[str, Any]] = []
     best_payload: tuple[dict[str, Any], list[dict[str, Any]], list[ExecutedTrade], list[dict[str, Any]], float] | None = None

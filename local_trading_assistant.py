@@ -14,7 +14,12 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from dependency_bootstrap import ensure_project_dependencies
+
+ensure_project_dependencies()
+
 from baostock_intraday import BaoStock5mClient
+from trading_journal import archive_trading_day, record_assistant_run
 
 
 MONITOR_DEFAULT_ARGS = [
@@ -86,10 +91,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--monitor-script", default="short_term_live_monitor.py")
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--today", default="")
-    parser.add_argument("--phase", choices=["auto", "opening", "intraday", "preclose"], default="auto")
+    parser.add_argument("--phase", choices=["auto", "opening", "intraday", "preclose", "postclose"], default="auto")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--intraday-interval-seconds", type=int, default=120)
     parser.add_argument("--focus-interval-seconds", type=int, default=300)
+    parser.add_argument("--postclose-interval-seconds", type=int, default=900)
+    parser.add_argument("--db", default="output/trading_assistant/trading_journal.sqlite")
+    parser.add_argument("--no-db", action="store_true")
     parser.add_argument("--beep", action="store_true")
     parser.add_argument("--github-mode", choices=["none", "commit"], default="none")
     parser.add_argument("--git-pull-before-scan", action="store_true")
@@ -117,6 +125,8 @@ def phase_for_time(now: dt.datetime) -> str:
         return "opening"
     if dt.time(14, 45) <= current <= dt.time(15, 5):
         return "preclose"
+    if dt.time(15, 5) < current <= dt.time(15, 30):
+        return "postclose"
     if dt.time(9, 45) <= current <= dt.time(11, 30):
         return "intraday"
     if dt.time(13, 0) <= current < dt.time(14, 45):
@@ -129,6 +139,8 @@ def next_sleep_seconds(phase: str, args: argparse.Namespace) -> int:
         return max(60, args.focus_interval_seconds)
     if phase == "intraday":
         return max(30, args.intraday_interval_seconds)
+    if phase == "postclose":
+        return max(300, args.postclose_interval_seconds)
     return 60
 
 
@@ -187,7 +199,24 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         ref_price = latest if latest > 0 else close
         target_price = ref_price * (1 + target_pct / 100) if ref_price else 0.0
         hard_stop_price = ref_price * (1 - stop_pct / 100) if ref_price else 0.0
-        if action == "BUY_TRIGGER":
+        if action == "DATA_UNAVAILABLE":
+            priority = 9
+            final_action = "DATA_UNAVAILABLE"
+            ref_price = 0.0
+            trigger = 0.0
+            vwap = 0.0
+            target_price = 0.0
+            hard_stop_price = 0.0
+            reason = "盘中5分钟行情不可用，暂停买入判断"
+        elif action == "QUOTE_ONLY":
+            priority = 8
+            final_action = "QUOTE_ONLY"
+            trigger = 0.0
+            vwap = 0.0
+            target_price = 0.0
+            hard_stop_price = 0.0
+            reason = "仅有实时报价兜底，缺少5分钟线/VWAP确认，暂停买入判断"
+        elif action == "BUY_TRIGGER":
             priority = 1
             final_action = "BUY_NOW"
             reason = "价格站上触发价和VWAP，且没有被高开/过热过滤拦截"
@@ -391,6 +420,15 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     return report, json_path, csv_path
 
 
+def payload_from_plan(json_path: Path) -> dict[str, object]:
+    if not json_path.exists():
+        return {}
+    try:
+        return json.loads(json_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
 def beep_if_needed(args: argparse.Namespace, buy_advices: list[BuyAdvice], sell_advices: list[SellAdvice]) -> None:
     if not args.beep:
         return
@@ -427,7 +465,7 @@ def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
     today = parse_date(args.today) if args.today else now.date()
     phase = phase_for_time(now) if args.phase == "auto" else args.phase
     if phase == "closed":
-        phase = "intraday"
+        phase = "postclose" if args.once else "closed"
     out_dir = (cwd / args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.git_pull_before_scan:
@@ -439,6 +477,14 @@ def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
     positions = load_positions(positions_path)
     sell_advices = build_sell_advice(positions, today, positions_path)
     report, json_path, csv_path = write_reports(out_dir, today, phase, mode, buy_advices, sell_advices, monitor_report, monitor_csv)
+    db_path = (cwd / args.db).resolve()
+    if not args.no_db:
+        payload = payload_from_plan(json_path)
+        if payload:
+            run_id = record_assistant_run(db_path, payload, report, json_path, csv_path)
+            if phase == "postclose":
+                archive_trading_day(db_path, today, out_dir, notes="postclose archive")
+            print(f"journal_db={db_path} run_id={run_id}")
     beep_if_needed(args, buy_advices, sell_advices)
     git_publish(cwd, args, [report, json_path, csv_path, out_dir / "latest_plan.md", out_dir / "latest_plan.json", out_dir / "latest_plan.csv"])
     print(f"phase={phase} buy_now={sum(1 for item in buy_advices if item.action == 'BUY_NOW')} sell_actions={sum(1 for item in sell_advices if item.action != 'HOLD')} report={report}")

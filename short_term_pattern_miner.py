@@ -27,6 +27,18 @@ from tech_event_backtest import PriceBar, fetch_yahoo_history
 from tech_event_radar import DEFAULT_HEADERS, load_watchlist, parse_date
 
 
+DEFAULT_SIGNAL_WEIGHTS: dict[str, float] = {
+    "liquidity": 14,
+    "value": 18,
+    "volatility": 22,
+    "range": 24,
+    "momentum": 10,
+    "trend": 12,
+    "event": 0,
+    "overheat_penalty": 16,
+}
+
+
 @dataclass
 class PatternRow:
     ticker: str
@@ -89,8 +101,18 @@ def max_range_pct_at(bars: list[PriceBar], end_index: int, window: int = 5, look
     return best
 
 
-def setup_type(event_score: int, value_ratio: float, max_5d: float, atr_pct: float) -> str:
-    if event_score >= 60:
+def component_value(value: float, high: float, mid: float, mid_score: float = 0.55) -> float:
+    if value >= high:
+        return 1.0
+    if value >= mid:
+        return mid_score
+    return 0.0
+
+
+def setup_type(event_score: int, value_ratio: float, max_5d: float, atr_pct: float, event_weight: float | None = None) -> str:
+    if event_weight is None:
+        event_weight = DEFAULT_SIGNAL_WEIGHTS["event"]
+    if event_weight > 0 and event_score >= 60:
         return "EVENT_PLUS_VOLATILITY"
     if value_ratio >= 1.5 and max_5d >= 10:
         return "VOLUME_BREAKOUT"
@@ -151,51 +173,51 @@ def feature_score(
     above_ma20: bool,
     event_score: int,
     min_traded_value: float,
+    weights: dict[str, float] | None = None,
 ) -> float:
+    weights = weights or DEFAULT_SIGNAL_WEIGHTS
     score = 0.0
-    if traded_value >= min_traded_value:
-        score += 18
-    elif traded_value >= min_traded_value * 0.4:
-        score += 8
-    if value_ratio >= 1.8:
-        score += 18
-    elif value_ratio >= 1.2:
-        score += 10
-    if atr_pct >= 6:
-        score += 18
-    elif atr_pct >= 3.5:
-        score += 10
-    if max_5d >= 12:
-        score += 18
-    elif max_5d >= 8:
-        score += 12
+    score += weights["liquidity"] * component_value(traded_value, min_traded_value, min_traded_value * 0.4, 0.45)
+    score += weights["value"] * component_value(value_ratio, 1.8, 1.2)
+    score += weights["volatility"] * component_value(atr_pct, 6.0, 3.5)
+    score += weights["range"] * component_value(max_5d, 12.0, 8.0, 0.65)
+
+    momentum_score = 0.0
     if 2 <= momentum_3d <= 14:
-        score += 8
+        momentum_score += 0.5
     elif momentum_3d > 20:
-        score -= 8
+        momentum_score -= 0.5
     if 4 <= momentum_10d <= 28:
-        score += 8
+        momentum_score += 0.5
     elif momentum_10d > 38:
-        score -= 10
+        momentum_score -= 0.6
     if value_ratio_3d >= 1.25 and value_ratio >= 1.0:
-        score += 6
-    if close_position_20d >= 82 and distance_ma5 > 6:
-        score -= 8
-    elif 55 <= close_position_20d <= 85:
-        score += 5
-    if change_1d <= -6:
-        score -= 8
+        momentum_score += 0.25
+    score += weights["momentum"] * momentum_score
+
+    trend_score = 0.0
     if above_ma5:
-        score += 8
+        trend_score += 0.28
     if above_ma20:
-        score += 10
+        trend_score += 0.36
     if -8 <= distance_high <= 0:
-        score += 10
-    if event_score >= 80:
-        score += 18
-    elif event_score >= 60:
-        score += 10
-    return score
+        trend_score += 0.24
+    if 55 <= close_position_20d <= 85:
+        trend_score += 0.12
+    score += weights["trend"] * trend_score
+
+    event_component = 1.0 if event_score >= 80 else 0.55 if event_score >= 60 else 0.0
+    score += weights["event"] * event_component
+
+    penalty = 0.0
+    if close_position_20d >= 82 and distance_ma5 > 6:
+        penalty += 0.6
+    if change_1d <= -6:
+        penalty += 0.5
+    if momentum_10d > 38:
+        penalty += 0.4
+    score -= weights["overheat_penalty"] * penalty
+    return round(score, 2)
 
 
 def build_rows_for_symbol(

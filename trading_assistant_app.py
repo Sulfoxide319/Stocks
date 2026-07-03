@@ -14,6 +14,10 @@ from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, X, Y, Button, Frame, Label, StringVar, Tk, Toplevel, messagebox
 from tkinter import ttk
 
+from dependency_bootstrap import ensure_project_dependencies
+
+ensure_project_dependencies()
+
 from local_trading_assistant import next_sleep_seconds, phase_for_time
 
 

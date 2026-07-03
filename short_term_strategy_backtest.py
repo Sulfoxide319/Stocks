@@ -20,6 +20,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from dependency_bootstrap import ensure_project_dependencies
+
+ensure_project_dependencies()
+
 import requests
 
 from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols

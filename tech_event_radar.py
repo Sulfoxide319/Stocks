@@ -26,12 +26,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
+from dependency_bootstrap import ensure_project_dependencies
 from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols
 
-try:
-    import requests
-except ImportError as exc:  # pragma: no cover - friendly runtime error
-    raise SystemExit("Missing dependency: pip install requests") from exc
+ensure_project_dependencies()
+
+import requests
 
 
 DEFAULT_HEADERS = {

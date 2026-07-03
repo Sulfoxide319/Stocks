@@ -7,9 +7,14 @@ import argparse
 import csv
 import datetime as dt
 import math
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from dependency_bootstrap import ensure_project_dependencies
+
+ensure_project_dependencies()
+
 from typing import Any
 
 import requests
@@ -55,6 +60,102 @@ class MonitorCandidate:
     sector_momentum_5d_pct: float
     reasons: str = ""
     risks: str = ""
+
+
+@dataclass(frozen=True)
+class EventScoreContext:
+    path: Path | None
+    scores: dict[str, int]
+    status: str
+    age_days: int | None
+    warning: str = ""
+
+
+@dataclass(frozen=True)
+class RealtimeQuote:
+    source: str
+    price: float
+    timestamp: str
+
+
+def ticker_to_sina_symbol(ticker: str) -> str:
+    raw = ticker.strip().lower().replace(".ss", "").replace(".sz", "")
+    if raw.startswith(("sh", "sz")) and len(raw) >= 8:
+        return raw[:8]
+    if raw.startswith(("6", "9")):
+        return f"sh{raw[:6]}"
+    return f"sz{raw[:6]}"
+
+
+def fetch_sina_quote(session: requests.Session, ticker: str) -> RealtimeQuote | None:
+    symbol = ticker_to_sina_symbol(ticker)
+    try:
+        response = session.get(
+            "https://hq.sinajs.cn/list=" + symbol,
+            headers={"Referer": "https://finance.sina.com.cn/"},
+            timeout=5,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+    text = response.content.decode("gbk", errors="ignore")
+    if '="' not in text:
+        return None
+    payload = text.split('="', 1)[1].split('";', 1)[0]
+    fields = payload.split(",")
+    if len(fields) < 32:
+        return None
+    try:
+        price = float(fields[3])
+    except ValueError:
+        return None
+    if price <= 0:
+        return None
+    timestamp = f"{fields[30]} {fields[31]}".strip()
+    return RealtimeQuote(source="sina", price=price, timestamp=timestamp)
+
+
+def event_file_date(path: Path) -> dt.date | None:
+    match = re.fullmatch(r"tech_event_radar_(\d{8})\.json", path.name)
+    if not match:
+        return None
+    try:
+        return dt.datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def find_latest_event_file(today: dt.date, output_dir: Path = Path("output")) -> Path | None:
+    dated: list[tuple[dt.date, Path]] = []
+    for path in output_dir.glob("tech_event_radar_*.json"):
+        date_value = event_file_date(path)
+        if date_value:
+            dated.append((date_value, path))
+    if not dated:
+        return None
+    usable = [item for item in dated if item[0] <= today]
+    source = usable or dated
+    source.sort(key=lambda item: item[0], reverse=True)
+    return source[0][1]
+
+
+def resolve_event_scores(events_arg: str, today: dt.date, max_event_age_days: int) -> EventScoreContext:
+    path = Path(events_arg) if events_arg else Path(f"output/tech_event_radar_{today:%Y%m%d}.json")
+    if not path.exists() and not events_arg:
+        latest = find_latest_event_file(today)
+        if latest:
+            path = latest
+    if not path.exists():
+        return EventScoreContext(None, {}, "missing", None, "event_file_missing")
+
+    file_date = event_file_date(path)
+    age_days = (today - file_date).days if file_date else None
+    if age_days is not None and age_days > max_event_age_days:
+        return EventScoreContext(path, {}, "stale_disabled", age_days, f"event_file_age={age_days}d")
+
+    scores = event_score_by_symbol(path)
+    status = "ok" if scores else "empty"
+    return EventScoreContext(path, scores, status, age_days)
 
 
 def dynamic_exit_params(row: PatternRow, target_atr: float, target_range: float, stop_atr: float, trail_atr: float) -> tuple[float, float, float]:
@@ -162,11 +263,17 @@ def latest_intraday_state(
     value_ratio: float,
     confirm_buffer: float,
     max_entry_extension: float,
+    quote_session: requests.Session | None = None,
+    quote_fallback: str = "sina",
 ) -> tuple[str, float, float, str, float, list[str], list[str]]:
     bars = client.fetch_5m(ticker, trade_date, trade_date)
     bars = [bar for bar in bars if dt.time(9, 30) <= bar.time <= dt.time(15, 0)]
     if not bars:
-        return "WAIT_SESSION", 0.0, 0.0, "", signal_close * (1 + confirm_buffer), [], ["no_intraday_bars"]
+        if quote_fallback == "sina" and quote_session is not None and trade_date == dt.date.today():
+            quote = fetch_sina_quote(quote_session, ticker)
+            if quote:
+                return "QUOTE_ONLY", quote.price, 0.0, quote.timestamp, 0.0, ["quote_only"], ["no_intraday_bars", "no_vwap", f"quote_source={quote.source}"]
+        return "DATA_UNAVAILABLE", 0.0, 0.0, "", 0.0, [], ["no_intraday_bars"]
     first = bars[0]
     latest = bars[-1]
     gap = first.open / signal_close - 1 if signal_close else 0.0
@@ -216,10 +323,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Monitor high expected-upside A-share short-term candidates.")
     parser.add_argument("--watchlist", default="config/watchlist.buyable_600_300_301_liquid.csv")
     parser.add_argument("--allowed-prefixes", default=",".join(DEFAULT_BUYABLE_PREFIXES))
-    parser.add_argument("--events", default="output/tech_event_radar_20260702.json")
+    parser.add_argument("--events", default="", help="event score JSON; defaults to today's tech_event_radar_YYYYMMDD.json, then latest dated file")
+    parser.add_argument("--max-event-age-days", type=int, default=1, help="disable event scores when the dated event file is older than this many days")
+    parser.add_argument("--quote-fallback", choices=["sina", "none"], default="sina", help="quote-only fallback when BaoStock 5m bars are unavailable")
     parser.add_argument("--today", default="")
     parser.add_argument("--lookback-days", type=int, default=160)
-    parser.add_argument("--min-score", type=float, default=85)
+    parser.add_argument("--min-score", type=float, default=90)
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--min-traded-value", type=float, default=200_000_000)
     parser.add_argument("--ma5-extension-limit", type=float, default=0.04)
@@ -264,7 +373,8 @@ def main() -> int:
     session = requests.Session()
     session.headers.update(DEFAULT_HEADERS)
     symbols = filter_symbols(load_watchlist(Path(args.watchlist)), args.allowed_prefixes)
-    event_scores = event_score_by_symbol(Path(args.events))
+    event_context = resolve_event_scores(args.events, today, args.max_event_age_days)
+    event_scores = event_context.scores
     fetch_start = today - dt.timedelta(days=args.lookback_days)
     price_map: dict[str, list[PriceBar]] = {}
     for symbol in symbols:
@@ -354,7 +464,10 @@ def main() -> int:
                     row.traded_value_ratio,
                     args.confirm_buffer,
                     args.max_entry_extension,
+                    session,
+                    args.quote_fallback,
                 )
+            has_intraday_data = action not in {"DATA_UNAVAILABLE", "QUOTE_ONLY"}
             candidates.append(
                 MonitorCandidate(
                     ticker=row.ticker,
@@ -362,16 +475,16 @@ def main() -> int:
                     signal_date=row.date,
                     setup_type=row.setup_type,
                     score=row.score,
-                    edge_score=round(edge_score(row, target, stop), 4),
+                    edge_score=round(edge_score(row, target, stop), 4) if has_intraday_data else 0.0,
                     action=action,
                     close=row.close,
                     latest_price=round(latest_price, 4),
                     intraday_vwap=round(vwap, 4),
                     intraday_time=intraday_time,
                     entry_trigger=round(trigger, 4),
-                    target_pct=round(target * 100, 2),
-                    hard_stop_pct=round(stop * 100, 2),
-                    trailing_stop_pct=round(trail * 100, 2),
+                    target_pct=round(target * 100, 2) if has_intraday_data else 0.0,
+                    hard_stop_pct=round(stop * 100, 2) if has_intraday_data else 0.0,
+                    trailing_stop_pct=round(trail * 100, 2) if has_intraday_data else 0.0,
                     ma5_distance_pct=row.distance_to_ma5_pct,
                     value_ratio=row.traded_value_ratio,
                     momentum_3d_pct=row.momentum_3d_pct,
@@ -382,8 +495,28 @@ def main() -> int:
                 )
             )
 
-    candidates.sort(key=lambda item: (item.action == "BUY_TRIGGER", item.edge_score, item.score), reverse=True)
+    action_rank = {
+        "BUY_TRIGGER": 4,
+        "WATCH": 3,
+        "WAIT_0945": 2,
+        "WATCH_NEXT_SESSION": 2,
+        "NO_NEW_ENTRY": 1,
+        "QUOTE_ONLY": 0,
+        "DATA_UNAVAILABLE": 0,
+    }
+    candidates.sort(key=lambda item: (action_rank.get(item.action, 1), item.edge_score, item.score), reverse=True)
     candidates = candidates[: args.top]
+    data_unavailable = args.mode == "intraday" and candidates and all(item.action == "DATA_UNAVAILABLE" for item in candidates)
+    quote_only = args.mode == "intraday" and candidates and any(item.action == "QUOTE_ONLY" for item in candidates)
+    intraday_status = (
+        "not_applicable"
+        if args.mode != "intraday"
+        else "unavailable"
+        if data_unavailable
+        else "partial_quote_only"
+        if quote_only
+        else "ok"
+    )
     default_name = f"short_term_live_monitor_{today:%Y%m%d}"
     out_path = Path(args.out or f"output/{default_name}.md")
     csv_path = Path(args.csv_out or f"output/{default_name}.csv")
@@ -401,12 +534,33 @@ def main() -> int:
         f"- Universe: `{args.watchlist}`",
         f"- Candidates: `{len(candidates)}`",
         f"- Market state: `{temperature['state']}` breadth_ma20=`{temperature['breadth_ma20']:.2%}` avg5d=`{temperature['avg_5d_return']:.2%}`",
+        f"- Event score source: `{event_context.path or '-'}` status=`{event_context.status}` age_days=`{event_context.age_days if event_context.age_days is not None else '-'}`",
+        f"- Intraday data status: `{intraday_status}`",
+        f"- Quote fallback: `{args.quote_fallback}`",
         f"- Entry window end: `{args.entry_end_time}`",
         f"- Active filters: gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
         "",
-        "| Action | Ticker | Name | Edge | Score | Trigger | Latest | VWAP | Target | Stop | MA5 Dist | Reasons | Risks |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
+    if data_unavailable:
+        lines.extend(
+            [
+                "> Intraday 5-minute bars are unavailable for all selected candidates. Buy-side ranking, target, and stop guidance are disabled for this scan.",
+                "",
+            ]
+        )
+    elif quote_only:
+        lines.extend(
+            [
+                "> Some candidates only have real-time quote fallback. Quote-only rows cannot confirm VWAP, trigger BUY_NOW, or carry target/stop guidance.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "| Action | Ticker | Name | Edge | Score | Trigger | Latest | VWAP | Target | Stop | MA5 Dist | Reasons | Risks |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        ]
+    )
     for item in candidates:
         lines.append(
             f"| {item.action} | {item.ticker} | {item.name} | {item.edge_score:.2f} | {item.score:.1f} | {item.entry_trigger:.2f} | {item.latest_price:.2f} | {item.intraday_vwap:.2f} | {item.target_pct:.2f}% | {item.hard_stop_pct:.2f}% | {item.ma5_distance_pct:.2f}% | {item.reasons or '-'} | {item.risks or '-'} |"

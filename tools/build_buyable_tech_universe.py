@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dependency_bootstrap import ensure_project_dependencies  # noqa: E402
 
 
 DEFAULT_PREFIXES = ("sh.600", "sz.300", "sz.301")
@@ -83,6 +90,7 @@ def main() -> int:
     parser.add_argument("--prefixes", default=",".join(DEFAULT_PREFIXES))
     args = parser.parse_args()
 
+    ensure_project_dependencies()
     import baostock as bs  # type: ignore
 
     prefixes = tuple(item.strip() for item in args.prefixes.split(",") if item.strip())

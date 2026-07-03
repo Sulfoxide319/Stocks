@@ -11,6 +11,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from dependency_bootstrap import ensure_project_dependencies
+
+ensure_project_dependencies()
+
 from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols
 from short_term_strategy_backtest import (
     build_signal_rows,

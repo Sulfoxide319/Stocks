@@ -21,6 +21,7 @@ run_trading_app.bat
 - Opening focus scan during `09:20-09:45`
 - 2-minute intraday buy/sell checks during `09:45-11:30` and `13:00-14:45`
 - Pre-close review during `14:45-15:05`
+- Post-close local journal archive during `15:05-15:30`
 - Reads latest plan JSON from `output/trading_assistant/latest_plan.json`
 - Shows a topmost popup only for actionable trading events
 
@@ -52,6 +53,15 @@ run_trading_app.bat
 `HOLD_T1`, `HOLD`, `WAIT`, and `WATCH_BUY` stay in the main window but do not trigger a popup.
 
 ## Nightly Publish
+
+The local assistant writes scan history to:
+
+```text
+output/trading_assistant/trading_journal.sqlite
+```
+
+The journal is local state. It separates system advice from future manually
+confirmed fills in the `actual_trades` table.
 
 After the close, publish the latest daily plan to GitHub:
 

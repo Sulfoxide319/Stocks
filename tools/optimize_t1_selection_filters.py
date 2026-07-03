@@ -130,7 +130,7 @@ def main() -> int:
         selection_mode="score",
     )
     _, broad_full_planned = build_planned_sets(rows_by_label, price_map, prefetch_args, windows, end_date)
-    intraday_map = prefetch_intraday(broad_full_planned, args)
+    intraday_map = prefetch_intraday(broad_full_planned, args, price_map)
 
     combos = itertools.product(
         parse_str_list(args.selection_modes),

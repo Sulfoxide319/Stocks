@@ -6,8 +6,15 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import sys
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dependency_bootstrap import ensure_project_dependencies  # noqa: E402
 
 
 def baostock_code(market: str, ticker: str) -> str:
@@ -30,6 +37,7 @@ def main() -> int:
     with Path(args.watchlist).open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
 
+    ensure_project_dependencies()
     import baostock as bs  # type: ignore
 
     login = bs.login()

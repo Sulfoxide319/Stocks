@@ -17,6 +17,14 @@ This project focuses on buyable A-share technology stocks under the current rule
 pip install -r requirements.txt
 ```
 
+Most command-line tools also auto-install missing Python dependencies from
+`requirements.txt` on first run. To disable this behavior in managed
+environments:
+
+```powershell
+$env:STOCKS_SKIP_AUTO_INSTALL='1'
+```
+
 ## Live 5-Minute Monitor
 
 Run once:

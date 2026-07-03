@@ -21,12 +21,21 @@ It does not place orders. It produces action advice:
 python local_trading_assistant.py --once
 ```
 
+If `requests` or `baostock` is missing, the assistant will install project
+dependencies from `requirements.txt` automatically before running. Disable this
+with:
+
+```powershell
+$env:STOCKS_SKIP_AUTO_INSTALL='1'
+```
+
 Force a phase:
 
 ```powershell
 python local_trading_assistant.py --once --phase opening
 python local_trading_assistant.py --once --phase intraday
 python local_trading_assistant.py --once --phase preclose
+python local_trading_assistant.py --once --phase postclose
 ```
 
 ## Run All Day
@@ -41,6 +50,16 @@ Default schedule:
 - `09:45-11:30`: intraday 2-minute buy/sell scan
 - `13:00-14:45`: intraday 2-minute buy/sell scan
 - `14:45-15:05`: pre-close review
+- `15:05-15:30`: post-close archive
+
+## Daily Loop
+
+Recommended operating flow:
+
+1. Before the open, generate today's focus list. This is a watchlist, not a buy signal.
+2. After `09:45`, poll every 2 minutes for VWAP, trigger, gap, and risk checks.
+3. During `14:45-15:05`, prioritize sell-side and weak-position handling.
+4. After the close, write the final plan and all advice events to the local journal database.
 
 ## Position File
 
@@ -72,6 +91,20 @@ Columns:
 - `output/trading_assistant/latest_plan.md`
 - `output/trading_assistant/latest_plan.csv`
 - `output/trading_assistant/latest_plan.json`
+- `output/trading_assistant/trading_journal.sqlite`
+
+The SQLite journal stores:
+
+- `assistant_runs`: one row per scan.
+- `advice_events`: every buy/sell advice row from each scan.
+- `daily_archives`: one post-close archive row per trade date.
+- `actual_trades`: reserved for manually confirmed fills or broker import.
+
+Disable database writes when testing:
+
+```powershell
+python local_trading_assistant.py --once --no-db
+```
 
 ## Optional GitHub Update
 

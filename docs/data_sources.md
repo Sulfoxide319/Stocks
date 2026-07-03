@@ -1,167 +1,117 @@
-# Data Sources And Stock Pool
+# Data Sources And Freshness Contract
 
-The system now uses three signal groups:
+This project currently defaults to an A-share short-term assistant for buyable
+`600`, `300`, and `301` symbols. The live path is intentionally stricter than
+the research path: when execution-grade intraday data is missing, the system
+must degrade visibly instead of producing a buy signal.
 
-1. Official events: SEC, CNInfo, RSS/IR feeds.
-2. Market confirmation: price trend, volume expansion, traded value expansion, turnover rate.
-3. Social attention: Xueqiu recent posts and simple bullish/bearish keyword counts.
+## Live Data Chain
 
-Official events keep the highest weight. Xueqiu is intentionally lower weight because comments can be noisy, promotional, or delayed.
+1. `config/watchlist.buyable_600_300_301_liquid.csv`
+   - Default stock universe.
+   - Built from buyable prefixes and BaoStock liquidity filters.
+   - `notes` keeps liquidity evidence such as `avg20_amount` and `last_amount`.
 
-## Expanded Stock Pool
+2. Yahoo daily bars
+   - Used by `short_term_live_monitor.py` for daily trend, volume/value
+     expansion, ATR, moving averages, market temperature, and sector context.
+   - This is a discovery and filtering source, not an execution source.
 
-The example watchlist now includes 86 technology names:
+3. BaoStock 5-minute bars
+   - Used for VWAP, entry-window checks, gap checks, sell-side monitoring, and
+     T+1 execution logic.
+   - Cache hits are valid only when the cached content covers the requested
+     trading date. File names alone are not trusted.
+   - Overlapping cache files are merged and de-duplicated before any remote
+     request. Missing weekdays are fetched in compact date ranges.
+   - Backtests pass the daily-bar trading calendar into 5-minute prefetch, so
+     exchange holidays are not treated as missing intraday coverage.
+   - Future end dates are clamped to the current date so backtests do not create
+     misleading cache files for unavailable future bars.
+   - BaoStock login is lazy and query failures caused by a dropped login session
+     are retried after re-login.
+   - If BaoStock has no 5-minute bars for a candidate, the candidate cannot
+     become `BUY_TRIGGER`.
 
-- U.S. AI and cloud: `NVDA`, `AMD`, `MSFT`, `GOOGL`, `AMZN`, `META`, `PLTR`, `ORCL`, `SMCI`, `DELL`, `HPE`.
-- U.S. semiconductor chain: `AVGO`, `MU`, `TSM`, `ASML`, `AMAT`, `LRCX`, `KLAC`, `MRVL`, `QCOM`, `INTC`, `ARM`, `CDNS`, `SNPS`, `ADI`, `TXN`, `NXPI`, `ON`.
-- U.S. software/security/networking: `ANET`, `CRWD`, `NOW`, `SNOW`, `PANW`, `ZS`, `NET`, `DDOG`, `MDB`, `TEAM`, `ADBE`, `CRM`.
-- U.S. data center power/infrastructure: `VRT`, `ETN`, `CEG`, `OKLO`.
-- China semiconductor, AI server, optical module, PCB, robotics, software, and AI vision names such as `688981`, `688012`, `688256`, `002371`, `000977`, `300308`, `300502`, `002463`, `300476`, `002415`.
+4. Sina quote fallback
+   - Used only when BaoStock 5-minute bars are unavailable for today's scan.
+   - Provides latest-price visibility only.
+   - Quote-only rows are marked `QUOTE_ONLY`; they do not carry VWAP, target,
+     stop, Edge ranking, or `BUY_NOW` eligibility.
 
-Edit:
+5. Event radar JSON
+   - `short_term_live_monitor.py` auto-loads `output/tech_event_radar_YYYYMMDD.json`
+     for the scan date, then falls back to the latest dated radar file.
+   - Event scores older than `--max-event-age-days` are disabled by default.
+   - The live report prints event source path, status, and age.
 
-```powershell
-notepad .\config\watchlist.example.csv
-```
+## Source Roles
 
-Important columns:
+| Source | Role | Can Trigger Buy? | Main Failure Mode | Required Degrade |
+|---|---|---:|---|---|
+| Watchlist CSV | Universe and liquidity scope | No | stale pool | regenerate liquidity pool |
+| Yahoo daily | setup discovery | No | delayed/missing bars | skip symbol or lower confidence |
+| BaoStock 5m | execution confirmation | Yes | no bars or stale cache | `DATA_UNAVAILABLE` |
+| Sina quote | latest-price fallback | No | delayed/blocked quote | `DATA_UNAVAILABLE` |
+| Event JSON | catalyst bonus | No | stale file | `stale_disabled` |
+| Xueqiu/CNInfo/RSS radar | research catalyst discovery | No direct live trigger | WAF/noisy text | low weight or disabled |
 
-- `ticker`: internal id used by the scripts.
-- `yahoo_symbol`: price source symbol, such as `NVDA`, `688981.SS`, `300308.SZ`.
-- `xueqiu_symbol`: Xueqiu symbol, such as `NVDA`, `SH688981`, `SZ300308`.
-- `rss_urls`: optional company IR/news RSS feeds separated by `|`.
+## Live Report Status
 
-## Xueqiu Usage
+`short_term_live_monitor.py` writes these data-health fields:
 
-The radar tries Xueqiu by default:
+- `Event score source`: the JSON used for event scores, or `-`.
+- `status`: `ok`, `empty`, `missing`, or `stale_disabled`.
+- `age_days`: age inferred from `tech_event_radar_YYYYMMDD.json`.
+- `Intraday data status`: `ok`, `partial_quote_only`, `unavailable`, or
+  `not_applicable` in daily mode.
+- `Quote fallback`: `sina` or `none`.
 
-```powershell
-python .\tech_event_radar.py --watchlist .\config\watchlist.example.csv --xueqiu-count 20
-```
+Interpretation:
 
-Disable it:
+- `ok`: 5-minute bars are available for the reported candidates.
+- `partial_quote_only`: at least one candidate has only a real-time quote
+  fallback. Do not trade those rows from this report.
+- `unavailable`: no execution-grade intraday data is available for selected
+  candidates. Buy-side target, stop, and ranking are disabled.
 
-```powershell
-python .\tech_event_radar.py --skip-xueqiu
-```
+## Operational Contract
 
-If Xueqiu returns no posts or blocks the request, provide a browser Cookie by either environment variable or a local ignored file.
+Before using the assistant during a trading day:
 
-```powershell
-$env:XUEQIU_COOKIE='paste raw Cookie header here'
-python .\tech_event_radar.py --watchlist .\config\watchlist.example.csv
-```
-
-Or:
-
-```powershell
-copy .\config\xueqiu_cookie.example.txt .\config\xueqiu_cookie.txt
-notepad .\config\xueqiu_cookie.txt
-python .\tech_event_radar.py --watchlist .\config\watchlist.example.csv
-```
-
-`config/xueqiu_cookie.txt` is ignored by git. Do not commit real cookies.
-
-You can capture a logged-in cookie with a temporary Edge profile:
-
-```powershell
-node .\tools\capture_xueqiu_cookie_edge.js
-```
-
-If `.xueqiu-edge-profile` already contains a logged-in session, this refreshes the cookie in headless/backend mode and writes only the raw Cookie header to `config/xueqiu_cookie.txt`.
-
-For first-time login or manual re-login, run it with a visible Edge window:
-
-```powershell
-$env:XUEQIU_COOKIE_CAPTURE_HEADLESS='0'
-node .\tools\capture_xueqiu_cookie_edge.js
-```
-
-You can probe a single symbol:
-
-```powershell
-python .\xueqiu_probe.py SH688981
-python .\xueqiu_probe.py NVDA
-```
-
-When the JSON social endpoints return WAF HTML or `405` in normal `requests`, `tech_event_radar.py` automatically falls back to the logged-in Edge profile. The browser fallback tries the stock discussion API first, then opens the Xueqiu hashtag page such as `https://xueqiu.com/k?q=#京东方A#` and extracts rendered discussion text from the page DOM. Disable that fallback only when needed:
+1. Refresh the event radar if catalysts matter for the session.
 
 ```powershell
-python .\tech_event_radar.py --no-xueqiu-browser-fallback
+python .\tech_event_radar.py --watchlist .\config\watchlist.buyable_600_300_301_liquid.csv --out .\output\tech_event_radar_YYYYMMDD.md --json-out .\output\tech_event_radar_YYYYMMDD.json
 ```
 
-The fallback defaults to headless Edge, so scheduled/backend runs do not need a visible browser window. If you need to debug the browser flow visually:
+2. Run the live assistant.
 
 ```powershell
-$env:XUEQIU_BROWSER_HEADLESS='0'
-python .\tech_event_radar.py --xueqiu-count 3
+python .\local_trading_assistant.py --once
 ```
 
-Direct browser-post probe:
+3. Treat these as hard stop states:
+
+- `DATA_UNAVAILABLE`
+- `QUOTE_ONLY`
+- `Intraday data status: unavailable`
+- `Event score source status: stale_disabled` when your thesis depends on events
+
+4. Regenerate the liquidity watchlist after major universe changes or after a
+long market regime change.
 
 ```powershell
-node .\tools\xueqiu_browser_status_fetch.js SH688981,SZ000725 3
+python .\tools\filter_watchlist_by_baostock_liquidity.py
 ```
 
-Small end-to-end fallback test:
+## Research Sources
 
-```powershell
-python .\tech_event_radar.py --watchlist .\config\watchlist.xueqiu_test.csv --today 2026-07-03 --skip-price --skip-sec-docs --xueqiu-count 5 --min-score 0
-```
+The broader radar code still supports CNInfo, RSS/IR pages, Xueqiu social
+attention, and older U.S. event workflows. These are research/discovery inputs.
+They should not bypass the live A-share execution contract above.
 
-## Market Activity Fields
-
-The radar now adds these fields to price signals:
-
-- `traded_value`: close price multiplied by volume when Yahoo history is available, or Xueqiu real-time amount when available.
-- `traded_value_ratio`: current traded value divided by the previous 20-bar average traded value.
-- `turnover_rate`: Xueqiu quote turnover rate when available.
-- `volume_ratio`: current volume divided by previous 20-bar average volume.
-
-Scoring uses these conservatively:
-
-- traded value expansion: modest positive score,
-- high absolute traded value: modest positive score,
-- price below MA20: risk flag,
-- Xueqiu hot posts or bullish comments: low-to-medium positive score only.
-
-## Practical Interpretation
-
-The best candidate is not "most discussed." It is:
-
-1. official or company-verifiable catalyst,
-2. high enough traded value to enter and exit,
-3. price above key moving averages,
-4. social attention increasing without obvious bearish language.
-
-If Xueqiu is blocked, the system still works with official events and Yahoo market data.
-
-## Weak Catalyst Blacklist
-
-Weak catalyst rules live in:
-
-```powershell
-config\weak_catalysts.json
-```
-
-The blacklist uses two mechanisms:
-
-- `hard_cap_terms`: caps the score, usually to `42`, for weak events like board changes, shareholder meeting votes, routine dividends, awards/rankings, and ordinary debt financing.
-- `soft_penalty_terms`: subtracts points from lower-signal items like conferences, marketing presentations, and routine SEC filing items.
-
-`rescue_terms` prevent real catalysts from being accidentally killed. For example, a title containing `strategic agreement` or `supply agreement` can still score well even if the same page has weaker wording elsewhere.
-
-After expanding the database to 86 symbols, the one-month default backtest produced more signals but weaker returns. This is expected: a larger stock pool increases coverage, but it also increases noisy events and high-volatility losers. Use the larger pool for discovery, then add liquidity, trend, and event-type filters before trading.
-
-## Official IR/RSS Sources Added
-
-The U.S. technology watchlist now includes official RSS or IR/news pages for:
-
-- NVIDIA, AMD, Broadcom, Micron, Applied Materials, CrowdStrike through validated RSS feeds.
-- Microsoft, Alphabet, Amazon, Meta, TSMC, ASML, Lam Research, KLA, Marvell, Qualcomm, Intel, Arista, Palantir, ServiceNow, Snowflake, and Oracle through official IR/news HTML pages when RSS is not stable.
-
-HTML pages are stricter than RSS:
-
-- the page must contain a catalyst keyword,
-- the script must find a date inside the scan window,
-- otherwise no event is emitted.
+Xueqiu remains low weight because discussion data can be delayed, promotional,
+or blocked by WAF. If Xueqiu is unavailable, the live assistant should continue
+with market data and explicit source status rather than silently assuming social
+attention is zero.
