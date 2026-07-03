@@ -57,9 +57,12 @@ class TradingAssistantApp:
         self.latest_md = self.out_dir / "latest_plan.md"
         self.positions_csv = self.cwd / "config" / "live_positions.csv"
         self.positions_example = self.cwd / "config" / "live_positions.example.csv"
+        self.install_dir = self.resolve_install_dir()
+        self.version = self.read_app_version()
 
         self.running = False
         self.scan_in_progress = False
+        self.update_in_progress = False
         self.alerted_keys: set[str] = set()
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 
@@ -67,6 +70,8 @@ class TradingAssistantApp:
         self.phase_text = StringVar(value="阶段：-")
         self.last_scan = StringVar(value="上次扫描：-")
         self.next_scan = StringVar(value="下一次扫描：-")
+        self.version_text = StringVar(value=f"版本：v{self.version}")
+        self.update_event = StringVar(value=f"更新事件：当前 v{self.version}，可手动检查 GitHub Release。")
         self.buy_count = StringVar(value="0")
         self.sell_count = StringVar(value="0")
         self.watch_count = StringVar(value="0")
@@ -103,6 +108,22 @@ class TradingAssistantApp:
         popup.geometry(f"{width}x{height}+{x}+{y}")
         popup.minsize(min(720, width), min(380, height))
         popup.maxsize(max_w, max_h)
+
+    def resolve_install_dir(self) -> Path:
+        for candidate in (self.cwd, self.cwd.parent):
+            if (candidate / "Update-StocksTool.ps1").exists():
+                return candidate
+        for candidate in (self.cwd, self.cwd.parent):
+            if (candidate / "VERSION").exists():
+                return candidate
+        return self.cwd
+
+    def read_app_version(self) -> str:
+        for candidate in (self.install_dir / "VERSION", self.cwd / "VERSION", self.cwd.parent / "VERSION"):
+            if candidate.exists():
+                text = candidate.read_text(encoding="utf-8").strip()
+                return text.lstrip("v") or "0.0.0"
+        return "0.0.0"
 
     def configure_style(self) -> None:
         style = ttk.Style()
@@ -168,6 +189,8 @@ class TradingAssistantApp:
         ttk.Label(parent, textvariable=self.phase_text, style="Subtle.TLabel").pack(anchor="w", pady=(14, 0))
         ttk.Label(parent, textvariable=self.last_scan, style="Subtle.TLabel").pack(anchor="w", pady=(6, 0))
         ttk.Label(parent, textvariable=self.next_scan, style="Subtle.TLabel").pack(anchor="w", pady=(6, 16))
+        ttk.Label(parent, textvariable=self.version_text, style="Subtle.TLabel").pack(anchor="w", pady=(0, 6))
+        Label(parent, textvariable=self.update_event, bg=COLORS["panel"], fg=COLORS["muted"], justify=LEFT, anchor="w", wraplength=230, font=("Microsoft YaHei UI", 9)).pack(fill=X, pady=(0, 14))
 
         metrics = ttk.Frame(parent, style="Panel.TFrame")
         metrics.pack(fill=X, pady=(0, 12))
@@ -180,6 +203,8 @@ class TradingAssistantApp:
         actions.pack(fill=X, pady=(8, 12))
         ttk.Button(actions, text="打开最新计划", command=self.open_latest_plan, style="Quiet.TButton").pack(fill=X, pady=(0, 8))
         ttk.Button(actions, text="编辑持仓 CSV", command=self.open_positions, style="Quiet.TButton").pack(fill=X, pady=(0, 8))
+        self.update_button = ttk.Button(actions, text="检查更新", command=self.check_update, style="Quiet.TButton")
+        self.update_button.pack(fill=X, pady=(0, 8))
         ttk.Button(actions, text="测试弹窗", command=self.test_alert, style="Quiet.TButton").pack(fill=X)
 
         rules = ttk.LabelFrame(parent, text="盘中规则", padding=10)
@@ -345,6 +370,8 @@ class TradingAssistantApp:
                     self.on_scan_ok(payload if isinstance(payload, dict) else {})
                 elif kind == "scan_error":
                     self.on_scan_error(str(payload))
+                elif kind == "update_done":
+                    self.on_update_done(payload if isinstance(payload, dict) else {})
         except queue.Empty:
             pass
         self.root.after(250, self.process_queue)
@@ -564,6 +591,78 @@ class TradingAssistantApp:
             os.startfile(self.positions_csv)
         else:
             messagebox.showinfo("暂无持仓文件", "没有找到 config/live_positions.csv。")
+
+    def find_updater(self) -> Path | None:
+        candidates = [
+            self.install_dir / "Update-StocksTool.ps1",
+            self.cwd / "Update-StocksTool.ps1",
+            self.cwd.parent / "Update-StocksTool.ps1",
+            self.cwd / "installer" / "Update-StocksTool.ps1",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def check_update(self) -> None:
+        if self.update_in_progress:
+            return
+        updater = self.find_updater()
+        if updater is None:
+            self.update_event.set("更新事件：未找到 Update-StocksTool.ps1，请使用新版安装包。")
+            return
+        if (self.install_dir / ".git").exists() and "installer" in updater.parts:
+            self.update_event.set("更新事件：当前是源码目录，请用 git pull 或发布包更新，避免覆盖工作区。")
+            return
+        self.update_in_progress = True
+        self.update_button.state(["disabled"])
+        self.update_event.set("更新事件：正在检查 GitHub Release...")
+        thread = threading.Thread(target=self.update_worker, args=(updater,), daemon=True)
+        thread.start()
+
+    def update_worker(self, updater: Path) -> None:
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(updater),
+            "-InstallDir",
+            str(self.install_dir),
+        ]
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            result = subprocess.run(command, text=True, capture_output=True, cwd=self.install_dir, creationflags=creationflags)
+            self.event_queue.put(
+                (
+                    "update_done",
+                    {
+                        "returncode": result.returncode,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    },
+                )
+            )
+        except Exception as exc:
+            self.event_queue.put(("update_done", {"returncode": 1, "stdout": "", "stderr": str(exc)}))
+
+    def on_update_done(self, result: dict[str, object]) -> None:
+        self.update_in_progress = False
+        self.update_button.state(["!disabled"])
+        stdout = str(result.get("stdout", "")).strip()
+        stderr = str(result.get("stderr", "")).strip()
+        lines = [line.strip() for line in (stdout + "\n" + stderr).splitlines() if line.strip()]
+        message = lines[-1] if lines else "检查完成。"
+        returncode = int(result.get("returncode", 0) or 0)
+        self.version = self.read_app_version()
+        self.version_text.set(f"版本：v{self.version}")
+        if returncode == 0:
+            if message.lower().startswith("updated to"):
+                message = f"{message}，重启后使用新版。"
+            self.update_event.set(f"更新事件：{message}")
+        else:
+            self.update_event.set(f"更新事件：更新失败：{message}")
 
     def test_alert(self) -> None:
         self.show_trade_alert(
