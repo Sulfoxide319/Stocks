@@ -1,0 +1,87 @@
+﻿market,ticker,name,cik,yahoo_symbol,xueqiu_symbol,cninfo_plate,rss_urls,notes
+US,NVDA,NVIDIA,,NVDA,NVDA,,https://nvidianews.nvidia.com/cats/press_release.xml|https://investor.nvidia.com/rss/event.aspx,AI accelerator and data center leader
+US,AMD,Advanced Micro Devices,,AMD,AMD,,https://ir.amd.com/news-events/press-releases/rss,AI GPU and CPU
+US,AVGO,Broadcom,,AVGO,AVGO,,https://investors.broadcom.com/rss/news-releases.xml|https://investors.broadcom.com/rss/events.xml,AI networking and custom silicon
+US,MU,Micron Technology,,MU,MU,,https://investors.micron.com/rss/news-releases.xml,memory and HBM
+US,MSFT,Microsoft,,MSFT,MSFT,,https://news.microsoft.com/feed/|https://www.microsoft.com/en-us/Investor/events,cloud AI platform
+US,GOOGL,Alphabet,,GOOGL,GOOGL,,https://abc.xyz/investor/news/|https://blog.google/technology/ai/rss/,cloud AI platform
+US,AMZN,Amazon,,AMZN,AMZN,,https://www.aboutamazon.com/news/rss|https://ir.aboutamazon.com/news-release,cloud and AI platform
+US,META,Meta Platforms,,META,META,,https://investor.atmeta.com/investor-news/default.aspx,AI application and capex leader
+US,TSM,Taiwan Semiconductor,,TSM,TSM,,https://investor.tsmc.com/english/news-and-events/news-releases,semiconductor foundry
+US,ASML,ASML Holding,,ASML,ASML,,https://www.asml.com/en/news/press-releases,semiconductor lithography equipment
+US,AMAT,Applied Materials,,AMAT,AMAT,,https://ir.appliedmaterials.com/rss/news-releases.xml,semiconductor equipment
+US,LRCX,Lam Research,,LRCX,LRCX,,https://investor.lamresearch.com/news-events/news-releases,semiconductor equipment
+US,KLAC,KLA,,KLAC,KLAC,,https://ir.kla.com/news-events/press-releases,semiconductor process control
+US,MRVL,Marvell Technology,,MRVL,MRVL,,https://investor.marvell.com/news-releases,AI networking and custom silicon
+US,QCOM,Qualcomm,,QCOM,QCOM,,https://investor.qualcomm.com/news-events/press-releases,edge AI and mobile chips
+US,INTC,Intel,,INTC,INTC,,https://www.intc.com/news-events/press-releases,CPU and foundry turnaround
+US,ANET,Arista Networks,,ANET,ANET,,https://investors.arista.com/news/news-releases,AI data center networking
+US,PLTR,Palantir,,PLTR,PLTR,,https://investors.palantir.com/news-events/press-releases,AI software platform
+US,CRWD,CrowdStrike,,CRWD,CRWD,,https://ir.crowdstrike.com/rss/news-releases.xml,cybersecurity
+US,NOW,ServiceNow,,NOW,NOW,,https://www.servicenow.com/company/media/press-room.html,enterprise AI software
+US,SNOW,Snowflake,,SNOW,SNOW,,https://investors.snowflake.com/news/news-details,data cloud
+US,ORCL,Oracle,,ORCL,ORCL,,https://investor.oracle.com/news-events/press-releases/default.aspx,cloud infrastructure
+SH,688981,SMIC,,688981.SS,SH688981,sh,,semiconductor foundry
+SH,688012,AMEC,,688012.SS,SH688012,sh,,semiconductor equipment
+SH,688256,Cambricon,,688256.SS,SH688256,sh,,AI chip
+SH,688111,Kingsoft Office,,688111.SS,SH688111,sh,,software and AI office
+SH,603501,Will Semiconductor,,603501.SS,SH603501,sh,,image sensor and chips
+SZ,002371,NAURA Technology,,002371.SZ,SZ002371,sz,,semiconductor equipment
+SZ,002475,Luxshare Precision,,002475.SZ,SZ002475,sz,,consumer electronics and AI hardware supply chain
+SZ,000977,Inspur Information,,000977.SZ,SZ000977,sz,,AI server
+SZ,002230,Iflytek,,002230.SZ,SZ002230,sz,,AI application
+SZ,300308,Zhongji Innolight,,300308.SZ,SZ300308,sz,,optical modules and data center
+SZ,300502,Eoptolink,,300502.SZ,SZ300502,sz,,optical modules
+SZ,300394,TFC Communication,,300394.SZ,SZ300394,sz,,optical components
+SZ,300124,Inovance Technology,,300124.SZ,SZ300124,sz,,industrial automation and robotics
+US,SMCI,Super Micro Computer,,SMCI,SMCI,,https://ir.supermicro.com/news-events/press-releases,AI server hardware
+US,DELL,Dell Technologies,,DELL,DELL,,https://investors.delltechnologies.com/news-events/press-releases,AI server and enterprise hardware
+US,HPE,Hewlett Packard Enterprise,,HPE,HPE,,https://investors.hpe.com/news-releases,AI servers and networking
+US,CDNS,Cadence Design Systems,,CDNS,CDNS,,https://investors.cadence.com/news-releases,EDA software
+US,SNPS,Synopsys,,SNPS,SNPS,,https://investor.synopsys.com/news-releases,EDA software
+US,ARM,Arm Holdings,,ARM,ARM,,https://investors.arm.com/news-and-events/news-releases,CPU IP and edge AI
+US,ADI,Analog Devices,,ADI,ADI,,https://investor.analog.com/news-releases,analog chips
+US,TXN,Texas Instruments,,TXN,TXN,,https://investor.ti.com/news-releases,analog and embedded chips
+US,MPWR,Monolithic Power Systems,,MPWR,MPWR,,https://ir.monolithicpower.com/news-releases,power semiconductors
+US,NXPI,NXP Semiconductors,,NXPI,NXPI,,https://investors.nxp.com/news-releases,automotive and edge chips
+US,ON,ON Semiconductor,,ON,ON,,https://investor.onsemi.com/news-releases,power and automotive chips
+US,WDC,Western Digital,,WDC,WDC,,https://investor.wdc.com/news-releases,storage and NAND
+US,STX,Seagate Technology,,STX,STX,,https://investors.seagate.com/news-releases,storage
+US,NET,Cloudflare,,NET,NET,,https://cloudflare.net/news/news-releases,edge cloud and cybersecurity
+US,PANW,Palo Alto Networks,,PANW,PANW,,https://investors.paloaltonetworks.com/news-releases,cybersecurity
+US,ZS,Zscaler,,ZS,ZS,,https://ir.zscaler.com/news-releases,cybersecurity
+US,DDOG,Datadog,,DDOG,DDOG,,https://investors.datadoghq.com/news-releases,observability and cloud software
+US,MDB,MongoDB,,MDB,MDB,,https://investors.mongodb.com/news-releases,database software
+US,TEAM,Atlassian,,TEAM,TEAM,,https://investors.atlassian.com/news-releases,enterprise software
+US,ADBE,Adobe,,ADBE,ADBE,,https://news.adobe.com/news/news-releases,creative AI software
+US,CRM,Salesforce,,CRM,CRM,,https://investor.salesforce.com/news/news-releases,enterprise AI software
+US,APP,AppLovin,,APP,APP,,https://investors.applovin.com/news-releases,AI ad tech
+US,VRT,Vertiv,,VRT,VRT,,https://investors.vertiv.com/news-releases,data center power and cooling
+US,ETN,Eaton,,ETN,ETN,,https://www.eaton.com/us/en-us/company/news-insights/news-releases.html,data center power infrastructure
+US,CEG,Constellation Energy,,CEG,CEG,,https://investors.constellationenergy.com/news-releases,AI data center power
+US,OKLO,Oklo,,OKLO,OKLO,,https://oklo.com/newsroom,nuclear power for data centers
+SH,688041,Hygon Information,,688041.SS,SH688041,sh,,CPU and AI chips
+SH,688008,Montage Technology,,688008.SS,SH688008,sh,,memory interface chips
+SH,688126,National Silicon,,688126.SS,SH688126,sh,,semiconductor wafers
+SH,688072,Piotech,,688072.SS,SH688072,sh,,semiconductor equipment
+SH,688120,Hwatsing Technology,,688120.SS,SH688120,sh,,semiconductor CMP equipment
+SH,688521,Verisilicon,,688521.SS,SH688521,sh,,chip IP
+SH,688099,Amlogic,,688099.SS,SH688099,sh,,AIoT chips
+SH,688036,Transsion,,688036.SS,SH688036,sh,,consumer electronics
+SH,600570,Hundsun Technologies,,600570.SS,SH600570,sh,,financial software
+SZ,000938,Unisplendour,,000938.SZ,SZ000938,sz,,networking and cloud infrastructure
+SZ,000063,ZTE,,000063.SZ,SZ000063,sz,,telecom equipment and servers
+SZ,002156,Tongfu Microelectronics,,002156.SZ,SZ002156,sz,,advanced packaging
+SZ,002185,Huatian Technology,,002185.SZ,SZ002185,sz,,semiconductor packaging
+SZ,002049,Unigroup Guoxin,,002049.SZ,SZ002049,sz,,chips and memory
+SZ,002463,WUS Printed Circuit,,002463.SZ,SZ002463,sz,,AI server PCB
+SZ,300476,Victory Giant Technology,,300476.SZ,SZ300476,sz,,high-speed PCB
+SZ,300433,Lens Technology,,300433.SZ,SZ300433,sz,,consumer electronics
+SZ,300496,Thunder Software,,300496.SZ,SZ300496,sz,,edge AI and smart cockpit software
+SZ,300454,Sangfor Technologies,,300454.SZ,SZ300454,sz,,cybersecurity and cloud
+SZ,300033,Hithink RoyalFlush,,300033.SZ,SZ300033,sz,,financial AI software
+SZ,300059,East Money,,300059.SZ,SZ300059,sz,,internet finance platform
+SZ,002236,Dahua Technology,,002236.SZ,SZ002236,sz,,AI vision
+SZ,002415,Hikvision,,002415.SZ,SZ002415,sz,,AI vision
+SZ,002600,Lingyi iTech,,002600.SZ,SZ002600,sz,,consumer electronics components
+SZ,300782,Maxscend Microelectronics,,300782.SZ,SZ300782,sz,,RF chips

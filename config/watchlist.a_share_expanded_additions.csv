@@ -1,0 +1,41 @@
+market,ticker,name,cik,yahoo_symbol,xueqiu_symbol,cninfo_plate,rss_urls,notes
+SH,603986,GigaDevice,,603986.SS,SH603986,sh,,memory and MCU chips
+SH,688396,China Resources Micro,,688396.SS,SH688396,sh,,power semiconductor and MCU
+SH,600460,Silan Micro,,600460.SS,SH600460,sh,,IDM semiconductor
+SH,688019,Anji Microelectronics,,688019.SS,SH688019,sh,,semiconductor materials
+SH,688082,ACM Research Shanghai,,688082.SS,SH688082,sh,,semiconductor cleaning equipment
+SH,688347,Hua Hong Company,,688347.SS,SH688347,sh,,semiconductor foundry
+SH,688385,Fudan Microelectronics,,688385.SS,SH688385,sh,,FPGA and security chips
+SZ,300661,SG Micro,,300661.SZ,SZ300661,sz,,analog chips
+SZ,002916,Shennan Circuits,,002916.SZ,SZ002916,sz,,AI server PCB and packaging substrate
+SH,603228,Jingwang Electronics,,603228.SS,SH603228,sh,,PCB
+SH,600183,Shengyi Technology,,600183.SS,SH600183,sh,,copper clad laminate and PCB materials
+SH,688183,Shengyi Electronics,,688183.SS,SH688183,sh,,high-speed PCB
+SZ,002938,Avary Holding,,002938.SZ,SZ002938,sz,,consumer electronics PCB
+SZ,300408,Chaozhou Three-Circle,,300408.SZ,SZ300408,sz,,ceramic components and electronics
+SZ,000988,Huagong Tech,,000988.SZ,SZ000988,sz,,optical modules and laser equipment
+SZ,002281,Accelink Technologies,,002281.SZ,SZ002281,sz,,optical communication modules
+SZ,300570,T&S Communications,,300570.SZ,SZ300570,sz,,optical communication components
+SH,601138,Foxconn Industrial Internet,,601138.SS,SH601138,sh,,AI server and industrial internet
+SH,603019,Dawning Information,,603019.SS,SH603019,sh,,servers and supercomputing
+SZ,000066,China Greatwall,,000066.SZ,SZ000066,sz,,domestic computing hardware
+SZ,000021,Shenzhen Kaifa,,000021.SZ,SZ000021,sz,,electronics manufacturing
+SZ,002747,Estun Automation,,002747.SZ,SZ002747,sz,,industrial robotics
+SZ,002472,Shuanghuan Driveline,,002472.SZ,SZ002472,sz,,robot reducer and precision transmission
+SZ,300024,Siasun Robot,,300024.SZ,SZ300024,sz,,robotics
+SH,688017,Green Harmonic,,688017.SS,SH688017,sh,,harmonic reducers for robotics
+SZ,002050,Sanhua Intelligent Controls,,002050.SZ,SZ002050,sz,,thermal management and robotics components
+SH,688777,Supcon Technology,,688777.SS,SH688777,sh,,industrial software and automation
+SH,600845,Baosight Software,,600845.SS,SH600845,sh,,industrial software and cloud
+SH,688327,CloudWalk,,688327.SS,SH688327,sh,,AI application
+SZ,300418,Kunlun Tech,,300418.SZ,SZ300418,sz,,AI application and internet platform
+SZ,300229,TRS Information,,300229.SZ,SZ300229,sz,,AI data and government software
+SZ,002410,Glodon,,002410.SZ,SZ002410,sz,,construction software and AI
+SH,688561,Qi An Xin,,688561.SS,SH688561,sh,,cybersecurity
+SZ,300369,NSFOCUS,,300369.SZ,SZ300369,sz,,cybersecurity
+SH,688023,DBAPPSecurity,,688023.SS,SH688023,sh,,cybersecurity
+SZ,002920,Desay SV,,002920.SZ,SZ002920,sz,,smart cockpit and autonomous driving
+SZ,002405,NavInfo,,002405.SZ,SZ002405,sz,,automotive software and maps
+SZ,002241,Goertek,,002241.SZ,SZ002241,sz,,consumer electronics and MR hardware
+SZ,300735,Guanghong Technology,,300735.SZ,SZ300735,sz,,electronics manufacturing
+SH,688208,Autel Intelligent,,688208.SS,SH688208,sh,,automotive diagnostics and smart hardware

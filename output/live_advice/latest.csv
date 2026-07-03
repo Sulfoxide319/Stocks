@@ -1,0 +1,11 @@
+﻿ticker,name,signal_date,setup_type,score,edge_score,action,close,latest_price,intraday_vwap,intraday_time,entry_trigger,target_pct,hard_stop_pct,trailing_stop_pct,ma5_distance_pct,value_ratio,momentum_3d_pct,sector_group,sector_momentum_5d_pct,reasons,risks
+600363,联创光电,2026-07-03,VOLUME_BREAKOUT,113.0,7.5467,WAIT_SESSION,36.81,0.0,0.0,,36.81,15.9,4.38,2.5,3.4163,1.7278,2.8787,other_tech,-3.1794,,no_intraday_bars
+301382,蜂助手,2026-07-03,VOLUME_BREAKOUT,113.0,6.9192,WAIT_SESSION,46.99,0.0,0.0,,46.99,15.69,5.59,2.5,3.2203,1.6759,2.1522,other_tech,-3.1794,,no_intraday_bars
+300024,机器人,2026-07-03,VOLUME_BREAKOUT,97.0,5.1615,WAIT_SESSION,18.31,0.0,0.0,,18.31,17.85,5.73,2.5,-0.7373,1.856,-5.2768,other_tech,-3.1794,,no_intraday_bars
+300418,昆仑万维,2026-07-03,VOLUME_BREAKOUT,101.0,5.1388,WAIT_SESSION,42.66,0.0,0.0,,42.66,14.98,5.35,2.5,2.0818,2.1257,5.6987,other_tech,-3.1794,,no_intraday_bars
+300102,乾照光电,2026-07-03,VOLUME_BREAKOUT,97.0,4.0349,WAIT_SESSION,25.53,0.0,0.0,,25.53,14.05,4.57,2.5,1.9976,1.6413,-1.9585,other_tech,-3.1794,,no_intraday_bars
+600877,电科芯片,2026-07-03,HIGH_VOLATILITY,97.0,3.6985,WAIT_SESSION,16.75,0.0,0.0,,16.75,15.11,4.63,2.5,-0.7349,1.2194,-2.2183,other_tech,-3.1794,,no_intraday_bars
+300458,全志科技,2026-07-03,HIGH_VOLATILITY,97.0,2.9132,WAIT_SESSION,37.65,0.0,0.0,,37.65,13.4,4.74,2.5,-1.1032,1.2162,-4.5869,other_tech,-3.1794,,no_intraday_bars
+300442,润泽科技,2026-07-03,HIGH_VOLATILITY,85.0,2.5954,WAIT_SESSION,85.44,0.0,0.0,,85.44,14.46,4.67,2.5,1.0957,1.1036,2.853,other_tech,-3.1794,,no_intraday_bars
+300037,新宙邦,2026-07-03,HIGH_VOLATILITY,87.0,2.1179,WAIT_SESSION,88.96,0.0,0.0,,88.96,16.18,5.86,2.5,-0.5322,0.8258,-4.1896,other_tech,-3.1794,,no_intraday_bars
+600060,海信视像,2026-07-03,HIGH_VOLATILITY,87.0,1.7011,WAIT_SESSION,27.52,0.0,0.0,,27.52,11.04,3.6,2.5,1.0502,0.7202,-1.2558,other_tech,-3.1794,,no_intraday_bars

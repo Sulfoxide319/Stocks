@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.log
+config/xueqiu_cookie.txt
+.xueqiu-edge-profile/
+output/*
+!output/live_advice/
+output/live_advice/*
+!output/live_advice/latest.md
+!output/live_advice/latest.csv
+!output/live_advice/.gitkeep

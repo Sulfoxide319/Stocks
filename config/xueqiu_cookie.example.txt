@@ -1,0 +1,4 @@
+Paste your raw Xueqiu Cookie header here, then save as config/xueqiu_cookie.txt.
+
+Example format:
+xq_a_token=...; u=...; device_id=...; acw_tc=...

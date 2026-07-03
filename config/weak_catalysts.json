@@ -1,0 +1,112 @@
+{
+  "hard_cap_score": 42,
+  "hard_cap_terms": {
+    "board_director_officer_changes": [
+      "appoints",
+      "appointed to board",
+      "board of directors",
+      "director resignation",
+      "chief accounting officer",
+      "8-k 5.02",
+      "董事",
+      "高管",
+      "聘任",
+      "辞职",
+      "离任"
+    ],
+    "shareholder_meeting_votes": [
+      "annual meeting",
+      "special meeting",
+      "shareholder meeting",
+      "stockholder meeting",
+      "5.07",
+      "8-k 5.07",
+      "股东大会",
+      "表决结果"
+    ],
+    "dividends_routine_capital_returns": [
+      "cash dividend",
+      "quarterly dividend",
+      "dividend payable",
+      "股息",
+      "分红",
+      "权益分派"
+    ],
+    "awards_rankings": [
+      "named",
+      "award",
+      "leader in",
+      "recognized",
+      "frost & sullivan",
+      "gartner",
+      "forrester",
+      "获奖",
+      "荣获",
+      "入选",
+      "评为"
+    ],
+    "ordinary_financing_debt": [
+      "pricing terms",
+      "debt securities",
+      "notes offering",
+      "tender offer",
+      "commences offers to purchase",
+      "债券",
+      "票据",
+      "融资券"
+    ]
+  },
+  "soft_penalty_terms": {
+    "conference_and_marketing": {
+      "penalty": 10,
+      "terms": [
+        "conference",
+        "webcast",
+        "presentation",
+        "fireside chat",
+        "investor conference",
+        "gpu conference",
+        "参会",
+        "会议",
+        "路演"
+      ]
+    },
+    "routine_product_marketing": {
+      "penalty": 8,
+      "terms": [
+        "showcases",
+        "demonstrates",
+        "launches availability",
+        "available now",
+        "展示",
+        "亮相"
+      ]
+    },
+    "ordinary_sec_items": {
+      "penalty": 12,
+      "terms": [
+        "8-k 3.02",
+        "8-k 5.03",
+        "8-k 9.01"
+      ]
+    }
+  },
+  "rescue_terms": [
+    "strategic agreement",
+    "strategic partnership",
+    "strategic collaboration",
+    "definitive agreement",
+    "supply agreement",
+    "major contract",
+    "customer win",
+    "purchase order",
+    "ai infrastructure",
+    "data center",
+    "战略合作",
+    "合作协议",
+    "重大合同",
+    "中标",
+    "订单",
+    "算力"
+  ]
+}
