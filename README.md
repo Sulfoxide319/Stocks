@@ -101,6 +101,27 @@ Nightly GitHub publishing is separate from the intraday popup app:
 python nightly_publish.py --pull --branch main
 ```
 
+## Release Installer
+
+Tagged releases publish a Windows zip installer named
+`StocksTradingAssistant-vX.Y.Z.zip`.
+
+Build a package locally:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build_release_package.ps1
+```
+
+Install from a release package:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-StocksTool.ps1
+```
+
+The installed `Start-TradingAssistant.bat` checks the latest GitHub Release
+before launching and applies updates automatically when a newer version is
+available.
+
 ## Publish Latest Advice To GitHub
 
 Commit and push the latest generated advice after each scan:

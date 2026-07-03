@@ -1,0 +1,37 @@
+name: Release Installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build installer package
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          ./tools/build_release_package.ps1 -Version $version
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $tag = "v$version"
+          $zip = "dist/StocksTradingAssistant-v$version.zip"
+          gh release create $tag $zip `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "Stocks Trading Assistant $tag" `
+            --notes "Windows installer package with automatic GitHub release update checks." `
+            --latest

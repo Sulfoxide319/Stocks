@@ -5,6 +5,8 @@ __pycache__/
 *.log
 node_modules/
 outputs/
+dist/
+release_tmp/
 config/xueqiu_cookie.txt
 config/live_positions.csv
 .xueqiu-edge-profile/
