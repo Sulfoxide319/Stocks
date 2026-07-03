@@ -85,3 +85,4 @@ Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $ZipPath -Force
 
 Write-Host "Built $ZipPath"
+exit 0

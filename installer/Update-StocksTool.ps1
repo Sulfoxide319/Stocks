@@ -58,6 +58,61 @@ function Invoke-GitHubGet {
     return Invoke-RestMethod -Uri $Uri -Headers (Get-GitHubHeaders)
 }
 
+function Invoke-GitHubWebGet {
+    param([string]$Uri)
+    return Invoke-WebRequest -Uri $Uri -Headers (Get-GitHubHeaders "text/html") -UseBasicParsing
+}
+
+function Get-ResponseUriText {
+    param([object]$Response)
+    if ($Response.BaseResponse.ResponseUri) {
+        return [string]$Response.BaseResponse.ResponseUri
+    }
+    if ($Response.BaseResponse.RequestMessage -and $Response.BaseResponse.RequestMessage.RequestUri) {
+        return [string]$Response.BaseResponse.RequestMessage.RequestUri
+    }
+    return ""
+}
+
+function Convert-HtmlDecoded {
+    param([string]$Value)
+    return [System.Net.WebUtility]::HtmlDecode($Value)
+}
+
+function Get-PublicGitHubRelease {
+    $latestPage = "https://github.com/$Repository/releases/latest"
+    $latestResponse = Invoke-GitHubWebGet $latestPage
+    $latestUri = Get-ResponseUriText $latestResponse
+    $tag = ""
+    $tagMatch = [regex]::Match($latestUri, "/releases/tag/([^/?#]+)")
+    if (-not $tagMatch.Success) {
+        $tagMatch = [regex]::Match([string]$latestResponse.Content, "/$([regex]::Escape($Repository))/releases/tag/([^`"?#<]+)")
+    }
+    if ($tagMatch.Success) {
+        $tag = Convert-HtmlDecoded $tagMatch.Groups[1].Value
+    }
+    if (-not $tag) {
+        throw "Could not find the latest public GitHub release tag."
+    }
+
+    $assetsPage = "https://github.com/$Repository/releases/expanded_assets/$tag"
+    $assetsResponse = Invoke-GitHubWebGet $assetsPage
+    $assets = @()
+    $pattern = 'href="/' + [regex]::Escape($Repository) + '/releases/download/' + [regex]::Escape($tag) + '/([^"]+)"'
+    foreach ($match in [regex]::Matches([string]$assetsResponse.Content, $pattern)) {
+        $name = [uri]::UnescapeDataString((Convert-HtmlDecoded $match.Groups[1].Value))
+        $assets += [pscustomobject]@{
+            name = $name
+            browser_download_url = "https://github.com/$Repository/releases/download/$tag/$name"
+            url = $null
+        }
+    }
+    return [pscustomobject]@{
+        tag_name = $tag
+        assets = $assets
+    }
+}
+
 function Get-GitHubErrorMessage {
     param([object]$ErrorRecord)
     $statusCode = $null
@@ -139,9 +194,15 @@ if (Test-QuietCheckCache) {
 try {
     $release = Invoke-GitHubGet $releaseUri
 } catch {
-    Write-UpdateLog (Get-GitHubErrorMessage $_)
-    Save-UpdateCache
-    exit 0
+    $apiError = Get-GitHubErrorMessage $_
+    Write-UpdateLog "$apiError Trying public GitHub Releases page..."
+    try {
+        $release = Get-PublicGitHubRelease
+    } catch {
+        Write-UpdateLog "Update check failed: $($_.Exception.Message)"
+        Save-UpdateCache
+        exit 0
+    }
 }
 
 $latestText = [string]$release.tag_name
