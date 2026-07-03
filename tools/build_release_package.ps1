@@ -67,11 +67,15 @@ shortcut.
 
 ## Start
 
-Use the desktop shortcut or run:
+After installation, use the desktop shortcut or run:
 
 ```text
 Start-TradingAssistant.bat
 ```
+
+You can also run `Start-TradingAssistant.bat` directly from the extracted zip
+folder. In that portable mode it launches the app from the bundled `app`
+directory.
 
 The start script checks GitHub Releases for updates before launching the app.
 "@
