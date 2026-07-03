@@ -9,6 +9,8 @@ import json
 import os
 import re
 import sys
+import threading
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -121,6 +123,19 @@ def read_installed_version(root: Path) -> str:
     return "0.0.0"
 
 
+def scan_debug_log_path() -> Path:
+    return app_data_dir() / "logs" / f"scan_debug_{dt.date.today():%Y%m%d}.log"
+
+
+def write_scan_debug_log(message: str) -> Path:
+    path = scan_debug_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp} {message}\n")
+    return path
+
+
 def fetch_latest_release(repository: str = REPOSITORY, timeout: int = 12) -> dict[str, Any]:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repository}/releases/latest",
@@ -215,6 +230,33 @@ def run_internal_monitor(argv: list[str]) -> int:
         sys.argv = previous
 
 
+def build_scan_args(phase: str, db_path: Path, trace: Any) -> argparse.Namespace:
+    trace(9, "准备扫描参数：计算输出目录")
+    out_dir = app_data_dir() / "output" / "trading_assistant"
+    trace(9, f"准备扫描参数：输出目录 {out_dir}")
+    trace(9, f"准备扫描参数：数据库 {db_path}")
+    argv = [
+        "--once",
+        "--phase",
+        phase,
+        "--out-dir",
+        str(out_dir),
+        "--db",
+        str(db_path),
+        "--app-db",
+        str(db_path),
+        "--use-app-db",
+    ]
+    trace(9, "准备扫描参数：检查打包运行模式")
+    if getattr(sys, "frozen", False):
+        argv.extend(["--python", sys.executable, "--monitor-script=--run-monitor"])
+        trace(9, f"准备扫描参数：打包 EXE {sys.executable}")
+    trace(9, "准备扫描参数：解析命令参数")
+    args = build_arg_parser().parse_args(argv)
+    trace(9, "准备扫描参数：解析完成")
+    return args
+
+
 class ScanWorker(QThread):
     progress = Signal(int, str)
     log = Signal(str)
@@ -226,43 +268,36 @@ class ScanWorker(QThread):
         self.root = root
         self.phase = phase
         self.db_path = db_path
+        self.python_thread_id: int | None = None
+
+    def trace(self, percent: int, message: str) -> None:
+        write_scan_debug_log(f"[scan-worker] {message}")
+        self.progress.emit(percent, message)
 
     def run(self) -> None:
-        self.progress.emit(7, "准备加载扫描模块")
+        self.python_thread_id = threading.get_ident()
+        self.trace(7, f"准备加载扫描模块；thread={self.python_thread_id}")
         import local_trading_assistant
 
-        self.progress.emit(8, "扫描模块已加载")
+        self.trace(8, "扫描模块已加载")
         previous_emit = local_trading_assistant.emit_progress
-        local_trading_assistant.emit_progress = lambda percent, message: self.progress.emit(int(percent), str(message))
+        local_trading_assistant.emit_progress = lambda percent, message: self.trace(int(percent), str(message))
         try:
-            self.progress.emit(9, "准备扫描参数")
-            out_dir = app_data_dir() / "output" / "trading_assistant"
-            argv = [
-                "--once",
-                "--phase",
-                self.phase,
-                "--out-dir",
-                str(out_dir),
-                "--db",
-                str(self.db_path),
-                "--app-db",
-                str(self.db_path),
-                "--use-app-db",
-            ]
-            if getattr(sys, "frozen", False):
-                argv.extend(["--python", sys.executable, "--monitor-script", "--run-monitor"])
-            args = build_arg_parser().parse_args(argv)
+            args = build_scan_args(self.phase, self.db_path, self.trace)
             self.log.emit(f"开始 {self.phase} 扫描")
-            self.progress.emit(10, "进入扫描流程")
+            self.trace(10, "进入扫描流程")
             run_once(args, self.root)
-            self.progress.emit(97, "读取最新扫描结果")
+            self.trace(97, "读取最新扫描结果")
             with connect(self.db_path) as conn:
                 payload = load_latest_snapshot(conn)
             self.finished_payload.emit(payload)
-        except Exception as exc:  # pragma: no cover - exercised through GUI flow.
+        except BaseException as exc:  # pragma: no cover - exercised through GUI flow.
+            write_scan_debug_log(f"[scan-worker] 扫描异常：{type(exc).__name__}: {exc}")
+            write_scan_debug_log(traceback.format_exc().rstrip())
             self.failed.emit(str(exc))
         finally:
             local_trading_assistant.emit_progress = previous_emit
+            write_scan_debug_log("[scan-worker] 扫描线程退出")
 
 
 class UpdateWorker(QThread):
@@ -287,6 +322,7 @@ class MainWindow(QMainWindow):
         self.scan_started_at: dt.datetime | None = None
         self.scan_stage_text = ""
         self.scan_last_heartbeat_seconds = 0
+        self.scan_last_stack_dump_seconds = 0
         self.scan_timer = QTimer(self)
         self.scan_timer.setInterval(10_000)
         self.scan_timer.timeout.connect(self.on_scan_heartbeat)
@@ -607,6 +643,9 @@ class MainWindow(QMainWindow):
         self.scan_started_at = dt.datetime.now()
         self.scan_stage_text = "启动扫描线程"
         self.scan_last_heartbeat_seconds = 0
+        self.scan_last_stack_dump_seconds = 0
+        debug_path = write_scan_debug_log(f"[ui] 启动扫描；phase={phase} root={self.root} db={self.db_path}")
+        self.append_log(f"诊断日志：{debug_path}")
         self.scan_timer.start()
         self.scan_worker = ScanWorker(self.root, phase, self.db_path)
         self.scan_worker.started.connect(lambda: self.on_scan_progress(6, "扫描线程已启动"))
@@ -634,11 +673,30 @@ class MainWindow(QMainWindow):
         stage = self.scan_stage_text or "等待后台扫描响应"
         self.status_label.setText(f"扫描中（{elapsed} 秒）")
         self.append_log(f"扫描仍在运行：已 {elapsed} 秒，当前阶段：{stage}")
+        if elapsed >= 30 and elapsed - self.scan_last_stack_dump_seconds >= 30:
+            self.scan_last_stack_dump_seconds = elapsed
+            self.dump_scan_worker_stack(elapsed, stage)
+
+    def dump_scan_worker_stack(self, elapsed: int, stage: str) -> None:
+        worker = self.scan_worker
+        thread_id = getattr(worker, "python_thread_id", None) if worker else None
+        write_scan_debug_log(f"[watchdog] elapsed={elapsed}s stage={stage} worker_thread={thread_id}")
+        if thread_id is None:
+            write_scan_debug_log("[watchdog] 后台线程还没有登记 Python thread id")
+            return
+        frame = sys._current_frames().get(thread_id)
+        if frame is None:
+            write_scan_debug_log("[watchdog] 没找到后台线程 frame，可能停在 C 扩展或已退出")
+            return
+        stack = "".join(traceback.format_stack(frame)).rstrip()
+        write_scan_debug_log("[watchdog] 后台扫描线程栈：\n" + stack)
+        self.append_log("已写入后台线程诊断栈")
 
     def on_scan_done(self, payload: dict[str, Any]) -> None:
         self.scan_button.setEnabled(True)
         self.scan_timer.stop()
         self.scan_started_at = None
+        write_scan_debug_log("[ui] 扫描完成")
         self.progress.setValue(100)
         self.status_label.setText("扫描完成")
         if payload:
@@ -651,6 +709,7 @@ class MainWindow(QMainWindow):
         self.scan_button.setEnabled(True)
         self.scan_timer.stop()
         self.scan_started_at = None
+        write_scan_debug_log(f"[ui] 扫描失败：{message}")
         self.status_label.setText("扫描失败")
         self.append_log(f"扫描失败：{message}")
         QMessageBox.critical(self, "扫描失败", message[:3000])
@@ -712,7 +771,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--no-update-check", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--scan-prepare-test", action="store_true")
     args, _ = parser.parse_known_args()
+    if args.scan_prepare_test:
+        phase = phase_for_time(dt.datetime.now())
+        if phase == "closed":
+            phase = "intraday"
+        write_scan_debug_log(f"[scan-prepare-test] root={app_root()} db={default_db_path()} phase={phase}")
+        build_scan_args(
+            phase,
+            default_db_path(),
+            lambda percent, message: write_scan_debug_log(f"[scan-prepare-test] {percent}% {message}"),
+        )
+        write_scan_debug_log("[scan-prepare-test] 参数准备完成")
+        return 0
     app = QApplication(sys.argv)
     window = MainWindow()
     if args.smoke_test:
