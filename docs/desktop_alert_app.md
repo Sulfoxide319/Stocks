@@ -24,6 +24,22 @@ run_trading_app.bat
 - Reads latest plan JSON from `output/trading_assistant/latest_plan.json`
 - Shows a topmost popup only for actionable trading events
 
+## Window Layout
+
+- Left sidebar: current state, phase, last scan time, next scan time, and action counters.
+- Main tabs:
+  - `总览`: buy and sell advice together.
+  - `买入`: only buy-side candidates and triggers.
+  - `卖出/持仓`: registered positions and sell-side rules.
+- Detail panel: click any row to see the trigger/cost, target, stop, edge, PnL, and reason.
+- Action buttons:
+  - `启动`: run automatically in trading windows.
+  - `停止`: stop automatic scans.
+  - `立即扫描`: run one scan now.
+  - `打开最新计划`: open the Markdown report.
+  - `编辑持仓 CSV`: open or create the local position file.
+  - `测试弹窗`: verify popup and sound behavior.
+
 ## Popup Actions
 
 - `BUY_NOW`: buy trigger is active

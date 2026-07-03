@@ -80,6 +80,13 @@ run_trading_app.bat
 
 The app keeps scanning locally. It pops up only when there is an actionable trading event such as `BUY_NOW`, `SELL_NOW`, `TAKE_PROFIT`, `TRAIL_SELL`, `VWAP_WEAK_SELL`, or `PRE_CLOSE_REDUCE`.
 
+The window is organized as a small trading workstation:
+
+- left sidebar for status, scan timing, and action counters
+- tabs for total view, buy-side candidates, and sell/position actions
+- detail panel for the selected row
+- topmost popup only for actionable trading events
+
 Nightly GitHub publishing is separate from the intraday popup app:
 
 ```powershell
