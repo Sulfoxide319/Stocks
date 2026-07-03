@@ -12,38 +12,61 @@ if (-not $Version) {
 $PackageName = "StocksTradingAssistant-v$Version"
 $TempRoot = Join-Path $Root "release_tmp"
 $PackageRoot = Join-Path $TempRoot $PackageName
-$AppRoot = Join-Path $PackageRoot "app"
+$PyInstallerWork = Join-Path $TempRoot "pyinstaller_work"
+$PyInstallerDist = Join-Path $TempRoot "pyinstaller_dist"
 $DistRoot = Join-Path $Root $OutputDir
 $ZipPath = Join-Path $DistRoot "$PackageName.zip"
 
 Remove-Item -Recurse -Force $TempRoot -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $AppRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
-
-$excludeDirs = @(".git", ".github", ".xueqiu-edge-profile", "__pycache__", "node_modules", "output", "outputs", "dist", "release_tmp")
-$excludeFiles = @("*.pyc", "*.pyo", "*.log")
-$robocopyArgs = @($Root, $AppRoot, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-foreach ($dir in $excludeDirs) {
-    $robocopyArgs += @("/XD", (Join-Path $Root $dir))
-}
-foreach ($file in $excludeFiles) {
-    $robocopyArgs += @("/XF", $file)
-}
-& robocopy @robocopyArgs | Out-Null
-if ($LASTEXITCODE -gt 7) {
-    throw "robocopy failed with exit code $LASTEXITCODE"
-}
 
 Copy-Item -Force (Join-Path $Root "installer\Install-StocksTool.ps1") (Join-Path $PackageRoot "Install-StocksTool.ps1")
 Copy-Item -Force (Join-Path $Root "installer\Update-StocksTool.ps1") (Join-Path $PackageRoot "Update-StocksTool.ps1")
 Copy-Item -Force (Join-Path $Root "installer\Start-TradingAssistant.bat") (Join-Path $PackageRoot "Start-TradingAssistant.bat")
 Copy-Item -Force (Join-Path $Root "VERSION") (Join-Path $PackageRoot "VERSION")
 
+& python -m pip install -r (Join-Path $Root "requirements.txt")
+if ($LASTEXITCODE -ne 0) {
+    throw "Dependency installation failed with exit code $LASTEXITCODE"
+}
+
+& python -m PyInstaller `
+    --noconfirm `
+    --clean `
+    --windowed `
+    --onefile `
+    --name StocksTradingAssistant `
+    --hidden-import short_term_live_monitor `
+    --exclude-module torch `
+    --exclude-module torchvision `
+    --exclude-module torchaudio `
+    --exclude-module tensorflow `
+    --exclude-module transformers `
+    --exclude-module scipy `
+    --exclude-module matplotlib `
+    --exclude-module numba `
+    --exclude-module llvmlite `
+    --exclude-module triton `
+    --exclude-module onnxruntime `
+    --exclude-module pytest `
+    --exclude-module altair `
+    --distpath $PyInstallerDist `
+    --workpath $PyInstallerWork `
+    --specpath $TempRoot `
+    (Join-Path $Root "desktop_app.py")
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
+
+Copy-Item -Force (Join-Path $PyInstallerDist "StocksTradingAssistant.exe") (Join-Path $PackageRoot "StocksTradingAssistant.exe")
+
 $manifest = [ordered]@{
     name = "Stocks Trading Assistant"
     version = $Version
     repository = "Sulfoxide319/Stocks"
     generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    executable = "StocksTradingAssistant.exe"
     start_script = "Start-TradingAssistant.bat"
     installer = "Install-StocksTool.ps1"
     updater = "Update-StocksTool.ps1"
@@ -61,21 +84,19 @@ Right click `Install-StocksTool.ps1`, choose **Run with PowerShell**, or run:
 powershell -ExecutionPolicy Bypass -File .\Install-StocksTool.ps1
 ```
 
-The installer copies the app to `%LOCALAPPDATA%\StocksTradingAssistant`,
-installs Python dependencies from `requirements.txt`, and creates a desktop
-shortcut.
+The installer copies the app to `%LOCALAPPDATA%\StocksTradingAssistant` and
+creates a desktop shortcut. Python is not required for the packaged EXE.
 
 ## Start
 
 After installation, use the desktop shortcut or run:
 
 ```text
-Start-TradingAssistant.bat
+StocksTradingAssistant.exe
 ```
 
 You can also run `Start-TradingAssistant.bat` directly from the extracted zip
-folder. In that portable mode it launches the app from the bundled `app`
-directory.
+folder. It checks for updates and launches the packaged EXE.
 
 The start script checks GitHub Releases for updates before launching the app.
 "@

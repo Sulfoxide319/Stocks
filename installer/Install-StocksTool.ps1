@@ -48,7 +48,7 @@ if (-not (Test-Path $AppSource)) {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-DirectoryContent -Source $AppSource -Destination $InstallDir
 
-foreach ($file in @("Update-StocksTool.ps1", "Start-TradingAssistant.bat", "VERSION", "release.json")) {
+foreach ($file in @("StocksTradingAssistant.exe", "Update-StocksTool.ps1", "Start-TradingAssistant.bat", "VERSION", "release.json")) {
     $source = Join-Path $PackageRoot $file
     if (Test-Path $source) {
         Copy-Item -Force $source (Join-Path $InstallDir $file)
@@ -56,12 +56,15 @@ foreach ($file in @("Update-StocksTool.ps1", "Start-TradingAssistant.bat", "VERS
 }
 
 if (-not $SkipDependencyInstall) {
-    $pythonExe = Resolve-Python
-    $requirements = Join-Path $InstallDir "requirements.txt"
-    if (Test-Path $requirements) {
-        & $pythonExe -m pip install -r $requirements
-        if ($LASTEXITCODE -ne 0) {
-            throw "Dependency installation failed."
+    $exePath = Join-Path $InstallDir "StocksTradingAssistant.exe"
+    if (-not (Test-Path $exePath)) {
+        $pythonExe = Resolve-Python
+        $requirements = Join-Path $InstallDir "requirements.txt"
+        if (Test-Path $requirements) {
+            & $pythonExe -m pip install -r $requirements
+            if ($LASTEXITCODE -ne 0) {
+                throw "Dependency installation failed."
+            }
         }
     }
 }
@@ -72,7 +75,12 @@ if (-not $NoShortcut) {
         $shortcutPath = Join-Path $desktop "Stocks Trading Assistant.lnk"
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = Join-Path $InstallDir "Start-TradingAssistant.bat"
+        $exePath = Join-Path $InstallDir "StocksTradingAssistant.exe"
+        if (Test-Path $exePath) {
+            $shortcut.TargetPath = $exePath
+        } else {
+            $shortcut.TargetPath = Join-Path $InstallDir "Start-TradingAssistant.bat"
+        }
         $shortcut.WorkingDirectory = $InstallDir
         $shortcut.Description = "Stocks Trading Assistant"
         $shortcut.Save()
@@ -80,5 +88,10 @@ if (-not $NoShortcut) {
 }
 
 Write-Host "Installed Stocks Trading Assistant to $InstallDir"
-Write-Host "Start with: $(Join-Path $InstallDir 'Start-TradingAssistant.bat')"
+$installedExe = Join-Path $InstallDir "StocksTradingAssistant.exe"
+if (Test-Path $installedExe) {
+    Write-Host "Start with: $installedExe"
+} else {
+    Write-Host "Start with: $(Join-Path $InstallDir 'Start-TradingAssistant.bat')"
+}
 exit 0

@@ -72,28 +72,33 @@ The latest plan is written to:
 
 To let the assistant evaluate sell rules, copy `config/live_positions.example.csv` to `config/live_positions.csv` and fill your real/paper positions. `config/live_positions.csv` is ignored by git.
 
-## Desktop Alert App
+## Desktop App
 
-Start the local popup app:
+The recommended desktop entry point is the packaged Windows app:
+
+```text
+StocksTradingAssistant.exe
+```
+
+It stores app-owned data in:
+
+```text
+%LOCALAPPDATA%\StocksTradingAssistant\data\assistant.sqlite
+```
+
+The desktop app provides:
+
+- a scan button with progress and logs
+- cached latest scan results on startup
+- position management backed by SQLite
+- CSV import for existing positions, without using CSV as the primary data store
+- update checks from the app without opening a console window
+
+The older Tkinter script is kept as a development fallback:
 
 ```powershell
 python trading_assistant_app.py
 ```
-
-Or double-click:
-
-```text
-run_trading_app.bat
-```
-
-The app keeps scanning locally. It pops up only when there is an actionable trading event such as `BUY_NOW`, `SELL_NOW`, `TAKE_PROFIT`, `TRAIL_SELL`, `VWAP_WEAK_SELL`, or `PRE_CLOSE_REDUCE`.
-
-The window is organized as a small trading workstation:
-
-- left sidebar for status, scan timing, and action counters
-- tabs for total view, buy-side candidates, and sell/position actions
-- detail panel for the selected row
-- topmost popup only for actionable trading events
 
 Nightly GitHub publishing is separate from the intraday popup app:
 
@@ -120,7 +125,8 @@ powershell -ExecutionPolicy Bypass -File .\Install-StocksTool.ps1
 
 The installed `Start-TradingAssistant.bat` checks the latest GitHub Release
 before launching and applies updates automatically when a newer version is
-available.
+available. Desktop shortcuts created by the installer point directly to
+`StocksTradingAssistant.exe`, so normal launch does not open a console window.
 
 ## Publish Latest Advice To GitHub
 

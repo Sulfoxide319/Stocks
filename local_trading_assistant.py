@@ -20,6 +20,8 @@ ensure_project_dependencies()
 
 from baostock_intraday import BaoStock5mClient
 from trading_journal import archive_trading_day, record_assistant_run
+from app_storage import connect as connect_app_storage
+from app_storage import default_db_path, export_open_positions_csv, save_latest_snapshot, update_positions_from_csv
 
 
 MONITOR_DEFAULT_ARGS = [
@@ -97,6 +99,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--focus-interval-seconds", type=int, default=300)
     parser.add_argument("--postclose-interval-seconds", type=int, default=900)
     parser.add_argument("--db", default="output/trading_assistant/trading_journal.sqlite")
+    parser.add_argument("--app-db", default="")
+    parser.add_argument("--use-app-db", action="store_true")
     parser.add_argument("--no-db", action="store_true")
     parser.add_argument("--beep", action="store_true")
     parser.add_argument("--github-mode", choices=["none", "commit"], default="none")
@@ -474,6 +478,12 @@ def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
         phase = "postclose" if args.once else "closed"
     out_dir = (cwd / args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    app_db_path = Path(args.app_db).resolve() if args.app_db else default_db_path()
+    positions_path = cwd / args.positions
+    if args.use_app_db:
+        positions_path = out_dir / "runtime_positions.csv"
+        with connect_app_storage(app_db_path) as conn:
+            export_open_positions_csv(conn, positions_path)
     emit_progress(10, f"准备 {phase} 扫描")
     if args.git_pull_before_scan:
         emit_progress(15, "同步 Git 最新结果")
@@ -483,10 +493,12 @@ def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
     candidates = read_candidates(monitor_csv)
     emit_progress(70, "生成买入建议")
     buy_advices = build_buy_advice(candidates, phase)
-    positions_path = cwd / args.positions
     emit_progress(78, "读取持仓并生成卖出建议")
     positions = load_positions(positions_path)
     sell_advices = build_sell_advice(positions, today, positions_path)
+    if args.use_app_db:
+        with connect_app_storage(app_db_path) as conn:
+            update_positions_from_csv(conn, positions_path)
     emit_progress(88, "写入扫描报告")
     report, json_path, csv_path = write_reports(out_dir, today, phase, mode, buy_advices, sell_advices, monitor_report, monitor_csv)
     db_path = (cwd / args.db).resolve()
@@ -494,6 +506,9 @@ def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
         emit_progress(93, "记录交易日志")
         payload = payload_from_plan(json_path)
         if payload:
+            if args.use_app_db:
+                with connect_app_storage(app_db_path) as conn:
+                    save_latest_snapshot(conn, payload)
             run_id = record_assistant_run(db_path, payload, report, json_path, csv_path)
             if phase == "postclose":
                 archive_trading_day(db_path, today, out_dir, notes="postclose archive")
