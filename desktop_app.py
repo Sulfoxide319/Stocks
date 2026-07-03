@@ -7,8 +7,12 @@ import argparse
 import datetime as dt
 import json
 import os
-import subprocess
+import re
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -57,6 +61,7 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
 
 ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标", "止损", "盈亏", "Edge", "理由"]
 POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标", "止损", "回撤%", "最高", "状态", "备注"]
+REPOSITORY = "Sulfoxide319/Stocks"
 
 
 class NullTextWriter:
@@ -89,6 +94,107 @@ def app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def parse_version_text(value: str) -> tuple[int, ...]:
+    clean = value.strip().lstrip("v")
+    parts: list[int] = []
+    for part in clean.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts or [0])
+
+
+def read_installed_version(root: Path) -> str:
+    version_path = root / "VERSION"
+    if version_path.exists():
+        return version_path.read_text(encoding="utf-8").strip()
+    return "0.0.0"
+
+
+def fetch_latest_release(repository: str = REPOSITORY, timeout: int = 12) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/releases/latest",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "StocksTradingAssistant",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_public_latest_release(repository: str = REPOSITORY, timeout: int = 12) -> dict[str, Any]:
+    latest_url = f"https://github.com/{repository}/releases/latest"
+    latest_request = urllib.request.Request(latest_url, headers={"User-Agent": "StocksTradingAssistant"})
+    with urllib.request.urlopen(latest_request, timeout=timeout) as response:
+        resolved_url = response.geturl()
+        body = response.read().decode("utf-8", errors="replace")
+    tag_match = re.search(r"/releases/tag/([^/?#]+)", resolved_url)
+    if not tag_match:
+        tag_match = re.search(rf"/{re.escape(repository)}/releases/tag/([^\"?#<]+)", body)
+    if not tag_match:
+        raise RuntimeError("无法从 GitHub Releases 页面读取最新版本。")
+    tag = urllib.parse.unquote(tag_match.group(1))
+
+    assets_url = f"https://github.com/{repository}/releases/expanded_assets/{tag}"
+    assets_request = urllib.request.Request(assets_url, headers={"User-Agent": "StocksTradingAssistant"})
+    with urllib.request.urlopen(assets_request, timeout=timeout) as response:
+        assets_body = response.read().decode("utf-8", errors="replace")
+    asset_url = ""
+    pattern = rf'href="/{re.escape(repository)}/releases/download/{re.escape(tag)}/([^"]+)"'
+    for match in re.finditer(pattern, assets_body):
+        name = urllib.parse.unquote(match.group(1))
+        if name.startswith("StocksTradingAssistant-v") and name.endswith(".zip"):
+            asset_url = f"https://github.com/{repository}/releases/download/{tag}/{name}"
+            break
+    return {
+        "tag_name": tag,
+        "html_url": f"https://github.com/{repository}/releases/tag/{tag}",
+        "assets": [{"name": asset_url.rsplit("/", 1)[-1], "browser_download_url": asset_url}] if asset_url else [],
+    }
+
+
+def check_latest_update(root: Path) -> dict[str, Any]:
+    current = read_installed_version(root)
+    try:
+        release = fetch_latest_release()
+    except urllib.error.HTTPError as exc:
+        if exc.code in {403, 404}:
+            try:
+                release = fetch_public_latest_release()
+            except Exception as fallback_exc:
+                if exc.code == 403:
+                    return {"ok": False, "message": f"GitHub 暂时限制了更新检查请求，公开页面 fallback 也失败：{fallback_exc}"}
+                return {"ok": False, "message": f"没有找到 GitHub 最新版本，公开页面 fallback 也失败：{fallback_exc}"}
+        else:
+            return {"ok": False, "message": f"检查更新失败：HTTP {exc.code}"}
+    except Exception as exc:
+        return {"ok": False, "message": f"检查更新失败：{exc}"}
+
+    latest = str(release.get("tag_name") or "v0.0.0")
+    assets = release.get("assets") or []
+    asset_url = ""
+    for asset in assets:
+        if str(asset.get("name", "")).startswith("StocksTradingAssistant-v") and str(asset.get("name", "")).endswith(".zip"):
+            asset_url = str(asset.get("browser_download_url") or "")
+            break
+    update_available = parse_version_text(latest) > parse_version_text(current)
+    if update_available:
+        message = f"发现新版本 {latest}，当前版本 v{current}。"
+    else:
+        message = f"已经是最新版本：v{current}。"
+    return {
+        "ok": True,
+        "message": message,
+        "current": current,
+        "latest": latest,
+        "update_available": update_available,
+        "release_url": str(release.get("html_url") or ""),
+        "asset_url": asset_url,
+    }
 
 
 def run_internal_monitor(argv: list[str]) -> int:
@@ -148,41 +254,14 @@ class ScanWorker(QThread):
 
 
 class UpdateWorker(QThread):
-    finished_update = Signal(int, str)
+    finished_update = Signal(dict)
 
     def __init__(self, root: Path) -> None:
         super().__init__()
         self.root = root
 
     def run(self) -> None:
-        updater = self.root / "Update-StocksTool.ps1"
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(updater),
-            "-InstallDir",
-            str(self.root),
-            "-QuietCheckIntervalHours",
-            "0",
-        ]
-        try:
-            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            result = subprocess.run(
-                command,
-                cwd=self.root,
-                text=True,
-                capture_output=True,
-                timeout=180,
-                creationflags=creationflags,
-            )
-            lines = [line.strip() for line in (result.stdout + "\n" + result.stderr).splitlines() if line.strip()]
-            message = lines[-1] if lines else "检查完成。"
-            self.finished_update.emit(int(result.returncode), message)
-        except Exception as exc:  # pragma: no cover - depends on local PowerShell/network state.
-            self.finished_update.emit(1, str(exc))
+        self.finished_update.emit(check_latest_update(self.root))
 
 
 class MainWindow(QMainWindow):
@@ -535,10 +614,6 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "扫描失败", message[:3000])
 
     def check_update(self) -> None:
-        updater = self.root / "Update-StocksTool.ps1"
-        if not updater.exists():
-            QMessageBox.information(self, "检查更新", "当前运行环境没有更新脚本。")
-            return
         if self.update_worker and self.update_worker.isRunning():
             return
         self.update_button.setEnabled(False)
@@ -548,14 +623,28 @@ class MainWindow(QMainWindow):
         self.update_worker.finished_update.connect(self.on_update_done)
         self.update_worker.start()
 
-    def on_update_done(self, returncode: int, message: str) -> None:
+    def on_update_done(self, result: dict[str, Any]) -> None:
         self.update_button.setEnabled(True)
         self.update_button.setText("检查更新")
+        message = str(result.get("message") or "检查完成。")
         self.append_log(f"更新检查：{message}")
-        if returncode == 0:
-            QMessageBox.information(self, "检查更新", message)
-        else:
+        if not result.get("ok"):
             QMessageBox.critical(self, "更新失败", message)
+            return
+        if result.get("update_available"):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("检查更新")
+            box.setText(message)
+            open_button = box.addButton("打开下载页面", QMessageBox.AcceptRole)
+            box.addButton("稍后", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() == open_button:
+                url = str(result.get("asset_url") or result.get("release_url") or "")
+                if url:
+                    webbrowser.open(url)
+        else:
+            QMessageBox.information(self, "检查更新", message)
 
     @staticmethod
     def _fmt(value: object) -> str:
