@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, X, Y, Canvas, Frame, Label, StringVar, Tk, Toplevel, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, X, Y, Canvas, Frame, IntVar, Label, StringVar, Tk, Toplevel, messagebox
 from tkinter import ttk
 
 from dependency_bootstrap import ensure_project_dependencies
@@ -75,6 +75,9 @@ class TradingAssistantApp:
         self.phase_text = StringVar(value="阶段：-")
         self.last_scan = StringVar(value="上次扫描：-")
         self.next_scan = StringVar(value="下一次扫描：-")
+        self.scan_progress_text = StringVar(value="扫描进度：待开始")
+        self.scan_progress = IntVar(value=0)
+        self.scan_log_text = StringVar(value="扫描日志：暂无。")
         self.version_text = StringVar(value=f"版本：v{self.version}")
         self.update_event = StringVar(value=f"更新：当前 v{self.version}")
         self.update_log = StringVar(value="更新日志：可手动检查 GitHub Release。")
@@ -213,6 +216,9 @@ class TradingAssistantApp:
         self.status_badge.grid(row=0, column=0, sticky="ew")
         for row, variable in enumerate((self.phase_text, self.last_scan, self.next_scan, self.update_event), start=1):
             ttk.Label(panel, textvariable=variable, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", pady=(8 if row == 1 else 4, 0))
+        self.scan_progressbar = ttk.Progressbar(panel, mode="determinate", maximum=100, variable=self.scan_progress)
+        self.scan_progressbar.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(panel, textvariable=self.scan_progress_text, style="Subtle.TLabel").grid(row=6, column=0, sticky="w", pady=(4, 0))
 
     def build_metrics_panel(self, parent: ttk.Frame) -> None:
         metrics = ttk.Frame(parent, style="Panel.TFrame")
@@ -275,6 +281,18 @@ class TradingAssistantApp:
             anchor="nw",
             wraplength=230,
             font=("Microsoft YaHei UI", 9),
+        ).pack(fill=X, anchor="w", pady=(12, 0))
+        Label(
+            content,
+            textvariable=self.scan_log_text,
+            bg=COLORS["muted_panel"],
+            fg=COLORS["ink"],
+            justify=LEFT,
+            anchor="nw",
+            wraplength=230,
+            padx=8,
+            pady=7,
+            font=("Consolas", 9),
         ).pack(fill=X, anchor="w", pady=(12, 0))
 
     def metric_card(self, parent: ttk.Frame, label: str, value: StringVar, color: str, row: int, column: int) -> None:
@@ -423,18 +441,38 @@ class TradingAssistantApp:
         self.scan_in_progress = True
         self.phase_text.set(f"阶段：{self.phase_label(phase)}")
         self.set_status("扫描中", COLORS["blue_bg"], COLORS["blue"])
+        self.set_scan_progress(5, f"准备扫描 {self.phase_label(phase)}")
+        self.scan_log_text.set("扫描日志：\n- 准备启动扫描进程")
         thread = threading.Thread(target=self.scan_worker, args=(phase,), daemon=True)
         thread.start()
 
     def scan_worker(self, phase: str) -> None:
-        command = [sys.executable, "local_trading_assistant.py", "--once", "--phase", phase]
+        command = [sys.executable, "-u", "local_trading_assistant.py", "--once", "--phase", phase]
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            result = subprocess.run(command, cwd=self.cwd, text=True, capture_output=True, check=True, creationflags=creationflags)
+            process = subprocess.Popen(
+                command,
+                cwd=self.cwd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+            )
+            output_lines: list[str] = []
+            if process.stdout is not None:
+                for line in process.stdout:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    output_lines.append(text)
+                    self.event_queue.put(("scan_output", text))
+            returncode = process.wait()
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, command, output="\n".join(output_lines), stderr="")
             payload = self.read_latest_payload()
-            self.event_queue.put(("scan_ok", {"phase": phase, "payload": payload, "stdout": result.stdout, "stderr": result.stderr}))
+            self.event_queue.put(("scan_ok", {"phase": phase, "payload": payload, "stdout": "\n".join(output_lines), "stderr": ""}))
         except subprocess.CalledProcessError as exc:
-            self.event_queue.put(("scan_error", f"{' '.join(command)}\n{exc.stdout}\n{exc.stderr}"))
+            self.event_queue.put(("scan_error", f"{' '.join(command)}\n{exc.output}\n{exc.stderr}"))
         except Exception as exc:
             self.event_queue.put(("scan_error", str(exc)))
 
@@ -447,7 +485,11 @@ class TradingAssistantApp:
         try:
             while True:
                 kind, payload = self.event_queue.get_nowait()
-                if kind == "scan_ok":
+                if kind == "scan_output":
+                    self.on_scan_output(str(payload))
+                elif kind == "scan_progress":
+                    self.on_scan_progress(payload if isinstance(payload, dict) else {})
+                elif kind == "scan_ok":
                     self.on_scan_ok(payload if isinstance(payload, dict) else {})
                 elif kind == "scan_error":
                     self.on_scan_error(str(payload))
@@ -457,8 +499,40 @@ class TradingAssistantApp:
             pass
         self.root.after(250, self.process_queue)
 
+    def on_scan_output(self, line: str) -> None:
+        if line.startswith("SCAN_PROGRESS|"):
+            parts = line.split("|", 2)
+            if len(parts) == 3:
+                try:
+                    self.set_scan_progress(int(parts[1]), parts[2])
+                    self.append_scan_log(parts[2])
+                    return
+                except ValueError:
+                    pass
+        self.append_scan_log(line)
+
+    def on_scan_progress(self, payload: dict[str, object]) -> None:
+        percent = int(payload.get("percent", 0) or 0)
+        message = str(payload.get("message", "扫描中"))
+        self.set_scan_progress(percent, message)
+        self.append_scan_log(message)
+
+    def set_scan_progress(self, percent: int, message: str) -> None:
+        value = max(0, min(100, percent))
+        self.scan_progress.set(value)
+        self.scan_progress_text.set(f"扫描进度：{value}% · {message}")
+
+    def append_scan_log(self, message: str) -> None:
+        lines = self.scan_log_text.get().splitlines()
+        if lines and lines[0].startswith("扫描日志"):
+            lines = lines[1:]
+        lines.append(f"- {dt.datetime.now():%H:%M:%S} {message}")
+        self.scan_log_text.set("扫描日志：\n" + "\n".join(lines[-8:]))
+
     def on_scan_ok(self, result: dict[str, object]) -> None:
         self.scan_in_progress = False
+        self.set_scan_progress(100, "扫描完成")
+        self.append_scan_log("扫描完成，正在刷新结果")
         payload = result.get("payload", {}) if isinstance(result, dict) else {}
         phase = str(result.get("phase", "-")) if isinstance(result, dict) else "-"
         generated = str(payload.get("generated_at", "-")) if isinstance(payload, dict) else "-"
@@ -478,6 +552,8 @@ class TradingAssistantApp:
 
     def on_scan_error(self, error: str) -> None:
         self.scan_in_progress = False
+        self.set_scan_progress(100, "扫描失败")
+        self.append_scan_log("扫描失败，请查看弹窗错误")
         self.set_status("扫描失败", COLORS["sell_bg"], COLORS["sell"])
         messagebox.showerror("交易助手扫描失败", error[:3000])
 
