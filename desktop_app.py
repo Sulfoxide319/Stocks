@@ -25,7 +25,6 @@ from app_storage import (
     migrate_legacy_files,
     save_position,
 )
-from local_trading_assistant import build_arg_parser, phase_for_time, run_once
 
 
 try:
@@ -58,6 +57,32 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
 
 ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标", "止损", "盈亏", "Edge", "理由"]
 POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标", "止损", "回撤%", "最高", "状态", "备注"]
+
+
+class NullTextWriter:
+    encoding = "utf-8"
+    errors = "replace"
+
+    def write(self, value: object) -> int:
+        return len(str(value))
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
+def ensure_text_stdio() -> None:
+    if sys.stdout is None:
+        sys.stdout = NullTextWriter()  # type: ignore[assignment]
+    if sys.stderr is None:
+        sys.stderr = NullTextWriter()  # type: ignore[assignment]
+
+
+ensure_text_stdio()
+
+from local_trading_assistant import build_arg_parser, phase_for_time, run_once
 
 
 def app_root() -> Path:
@@ -122,6 +147,44 @@ class ScanWorker(QThread):
             local_trading_assistant.emit_progress = previous_emit
 
 
+class UpdateWorker(QThread):
+    finished_update = Signal(int, str)
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    def run(self) -> None:
+        updater = self.root / "Update-StocksTool.ps1"
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(updater),
+            "-InstallDir",
+            str(self.root),
+            "-QuietCheckIntervalHours",
+            "0",
+        ]
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            result = subprocess.run(
+                command,
+                cwd=self.root,
+                text=True,
+                capture_output=True,
+                timeout=180,
+                creationflags=creationflags,
+            )
+            lines = [line.strip() for line in (result.stdout + "\n" + result.stderr).splitlines() if line.strip()]
+            message = lines[-1] if lines else "检查完成。"
+            self.finished_update.emit(int(result.returncode), message)
+        except Exception as exc:  # pragma: no cover - depends on local PowerShell/network state.
+            self.finished_update.emit(1, str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -129,6 +192,7 @@ class MainWindow(QMainWindow):
         self.db_path = default_db_path()
         self.selected_position_id: int | None = None
         self.scan_worker: ScanWorker | None = None
+        self.update_worker: UpdateWorker | None = None
         with connect(self.db_path) as conn:
             self.migration_notes = migrate_legacy_files(conn, self.root)
         self.setWindowTitle("A股短线交易助手")
@@ -475,27 +539,20 @@ class MainWindow(QMainWindow):
         if not updater.exists():
             QMessageBox.information(self, "检查更新", "当前运行环境没有更新脚本。")
             return
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(updater),
-            "-InstallDir",
-            str(self.root),
-            "-QuietCheckIntervalHours",
-            "0",
-        ]
-        try:
-            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            result = subprocess.run(command, cwd=self.root, text=True, capture_output=True, timeout=60, creationflags=creationflags)
-        except Exception as exc:
-            QMessageBox.critical(self, "更新失败", str(exc))
+        if self.update_worker and self.update_worker.isRunning():
             return
-        lines = [line.strip() for line in (result.stdout + "\n" + result.stderr).splitlines() if line.strip()]
-        message = lines[-1] if lines else "检查完成。"
-        if result.returncode == 0:
+        self.update_button.setEnabled(False)
+        self.update_button.setText("检查中...")
+        self.append_log("开始检查更新")
+        self.update_worker = UpdateWorker(self.root)
+        self.update_worker.finished_update.connect(self.on_update_done)
+        self.update_worker.start()
+
+    def on_update_done(self, returncode: int, message: str) -> None:
+        self.update_button.setEnabled(True)
+        self.update_button.setText("检查更新")
+        self.append_log(f"更新检查：{message}")
+        if returncode == 0:
             QMessageBox.information(self, "检查更新", message)
         else:
             QMessageBox.critical(self, "更新失败", message)
@@ -518,6 +575,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    ensure_text_stdio()
     if len(sys.argv) > 1 and sys.argv[1] == "--run-monitor":
         return run_internal_monitor(sys.argv[2:])
     parser = argparse.ArgumentParser(add_help=False)
