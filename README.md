@@ -2,13 +2,17 @@
 
 A-share short-term signal research and live monitoring toolkit.
 
-This project focuses on buyable A-share technology stocks under the current rule set:
+This project focuses on buyable A-share short-term candidates under the current rule set:
 
-- Stock universe: `600`, `300`, `301`
-- No STAR Market or US stocks
+- Default stock universe: liquid mainboard-style A-share symbols from
+  `config/watchlist.mainboard_liquid.csv`
+- Default buyable prefixes: `000`, `001`, `002`, `003`, `600`, `601`, `603`, `605`
+- No ChiNext `300/301`, STAR Market, or US stocks in the default live package
 - T+1 execution: positions bought today cannot be sold today
-- Dynamic market regime filter: hot/normal/cold
+- Dynamic market regime filter: skip new hot-market entries; normal uses full
+  size; cold uses reduced risk in strict backtests
 - 5-minute BaoStock/VWAP execution layer
+- Buy confirmation requires price above both the trigger and buffered VWAP
 - Local-only Xueqiu cookie support
 
 ## Install

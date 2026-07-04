@@ -262,6 +262,7 @@ def latest_intraday_state(
     gap_volume_min_ratio: float,
     value_ratio: float,
     confirm_buffer: float,
+    vwap_buffer: float,
     max_entry_extension: float,
     quote_session: requests.Session | None = None,
     quote_fallback: str = "sina",
@@ -287,7 +288,8 @@ def latest_intraday_state(
     amount = sum(bar.amount for bar in bars)
     volume = sum(bar.volume for bar in bars)
     vwap = amount / volume if volume > 0 else latest.close
-    trigger = max(signal_close * (1 + confirm_buffer), vwap)
+    vwap_trigger = vwap * (1 + vwap_buffer)
+    trigger = max(signal_close * (1 + confirm_buffer), vwap_trigger)
     reasons: list[str] = []
     risks: list[str] = []
     if latest.time < dt.time(9, 45):
@@ -296,11 +298,13 @@ def latest_intraday_state(
         risks.append("after_entry_window")
     if latest.close / signal_close - 1 > max_entry_extension:
         risks.append("too_extended_from_signal")
-    if latest.close >= trigger:
+    above_trigger = latest.close >= trigger
+    above_vwap = latest.close >= vwap_trigger
+    if above_trigger:
         reasons.append("above_trigger")
-    if latest.close >= vwap:
-        reasons.append("above_vwap")
-    action = "BUY_TRIGGER" if reasons and not risks else "WATCH"
+    if above_vwap:
+        reasons.append("above_vwap_buffer")
+    action = "BUY_TRIGGER" if above_trigger and above_vwap and not risks else "WATCH"
     if risks and "after_entry_window" in risks:
         action = "NO_NEW_ENTRY"
     return action, latest.close, vwap, latest.time.isoformat(timespec="minutes"), trigger, reasons, risks
@@ -361,11 +365,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap-volume-threshold", type=float, default=0.0)
     parser.add_argument("--gap-volume-min-ratio", type=float, default=0.0)
     parser.add_argument("--confirm-buffer", type=float, default=0.0)
+    parser.add_argument("--vwap-buffer", type=float, default=0.003)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
     parser.add_argument("--max-5d-range-pct", type=float, default=0.0)
     parser.add_argument("--max-momentum-10d-pct", type=float, default=999.0)
     parser.add_argument("--max-close-position-20d-pct", type=float, default=100.0)
     parser.add_argument("--dynamic-params", action="store_true")
+    parser.add_argument("--skip-hot-entries", action="store_true")
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
     parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--hot-max-5d-range-pct", type=float, default=32.0)
@@ -518,6 +524,7 @@ def main() -> int:
         "too_far_above_ma5": 0,
         "too_far_from_20d_high": 0,
         "traded_value_below_200m": 0,
+        "hot_market_skipped": 0,
         "passed_daily_filters": 0,
     }
     entry_hour, entry_minute = (int(part) for part in args.entry_end_time.split(":", 1))
@@ -527,6 +534,9 @@ def main() -> int:
         for index, symbol in enumerate(symbols, start=1):
             if index == 1 or index % 10 == 0:
                 monitor_progress(f"候选过滤 {index}/{total_symbols}：{symbol.ticker} {symbol.name}")
+            if args.skip_hot_entries and str(temperature["state"]) == "hot":
+                filter_counts["hot_market_skipped"] += 1
+                continue
             bars = price_map.get(symbol.ticker, [])
             sector = sector_by_ticker.get(symbol.ticker, "other_tech")
             sector_momentum, sector_above = sector_context.get(sector, (0.0, 0.0))
@@ -570,6 +580,7 @@ def main() -> int:
                     active_gap_volume_min_ratio,
                     row.traded_value_ratio,
                     args.confirm_buffer,
+                    args.vwap_buffer,
                     args.max_entry_extension,
                     session,
                     args.quote_fallback,
@@ -614,6 +625,7 @@ def main() -> int:
         f"离MA5过远 {filter_counts['too_far_above_ma5']}",
         f"离20日高点过远 {filter_counts['too_far_from_20d_high']}",
         f"成交额不足 {filter_counts['traded_value_below_200m']}",
+        f"热行情停开 {filter_counts['hot_market_skipped']}",
         f"通过日线过滤 {filter_counts['passed_daily_filters']}",
         f"最终候选 {len(candidates)}",
     ]
@@ -678,6 +690,7 @@ def main() -> int:
         f"| Too far above MA5 | {filter_counts['too_far_above_ma5']} |",
         f"| Too far from 20-day high | {filter_counts['too_far_from_20d_high']} |",
         f"| Traded value below 200m | {filter_counts['traded_value_below_200m']} |",
+        f"| Hot market skipped | {filter_counts['hot_market_skipped']} |",
         f"| Passed daily filters | {filter_counts['passed_daily_filters']} |",
         f"| Final candidates | {len(candidates)} |",
         "",

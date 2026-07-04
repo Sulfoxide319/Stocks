@@ -1,14 +1,17 @@
 # Data Sources And Freshness Contract
 
-This project currently defaults to an A-share short-term assistant for buyable
-`600`, `300`, and `301` symbols. The live path is intentionally stricter than
-the research path: when execution-grade intraday data is missing, the system
-must degrade visibly instead of producing a buy signal.
+This project currently defaults to an A-share short-term assistant for liquid
+mainboard-style symbols. The live path is intentionally stricter than the
+research path: when execution-grade intraday data is missing, the system must
+degrade visibly instead of producing a buy signal.
 
 ## Live Data Chain
 
-1. `config/watchlist.buyable_600_300_301_liquid.csv`
+1. `config/watchlist.mainboard_liquid.csv`
    - Default stock universe.
+   - Default buyable prefixes: `000`, `001`, `002`, `003`, `600`, `601`, `603`,
+     `605`.
+   - ChiNext `300/301` is not included in the default live package.
    - Built from buyable prefixes and BaoStock liquidity filters.
    - `notes` keeps liquidity evidence such as `avg20_amount` and `last_amount`.
 
@@ -82,7 +85,7 @@ Before using the assistant during a trading day:
 1. Refresh the event radar if catalysts matter for the session.
 
 ```powershell
-python .\tech_event_radar.py --watchlist .\config\watchlist.buyable_600_300_301_liquid.csv --out .\output\tech_event_radar_YYYYMMDD.md --json-out .\output\tech_event_radar_YYYYMMDD.json
+python .\tech_event_radar.py --watchlist .\config\watchlist.mainboard_liquid.csv --out .\output\tech_event_radar_YYYYMMDD.md --json-out .\output\tech_event_radar_YYYYMMDD.json
 ```
 
 2. Run the live assistant.

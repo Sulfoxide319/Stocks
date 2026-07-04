@@ -7,9 +7,10 @@ import argparse
 import csv
 import datetime as dt
 import json
+import math
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -30,6 +31,7 @@ from short_term_strategy_backtest import (
     passes_strategy,
 )
 from tech_event_backtest import PriceBar, fetch_yahoo_history
+from tech_event_backtest import BaoStockDailyClient
 from tech_event_radar import DEFAULT_HEADERS, load_watchlist, parse_date
 from tools.backtest_existing_strategy_ledger import (
     cached_history,
@@ -37,10 +39,19 @@ from tools.backtest_existing_strategy_ledger import (
     dynamic_param_overrides,
     market_temperature,
     planned_passes_dynamic_filters,
+    price_bars_to_dicts,
     selection_key,
     subtract_months,
     write_outputs,
 )
+
+
+@dataclass(frozen=True)
+class OpenPosition:
+    planned: PlannedTrade
+    shares: int
+    cost_basis: float
+    buy_fee: float
 
 
 def parse_clock(raw: str) -> dt.time:
@@ -74,6 +85,16 @@ def close_on_or_before(bars: list[PriceBar], date_value: dt.date) -> float | Non
     value: float | None = None
     for bar in bars:
         if bar.date <= date_value:
+            value = bar.close
+        else:
+            break
+    return value
+
+
+def previous_close_before(bars: list[PriceBar], date_value: dt.date) -> float | None:
+    value: float | None = None
+    for bar in bars:
+        if bar.date < date_value:
             value = bar.close
         else:
             break
@@ -128,12 +149,91 @@ def intraday_vwap_by_moment(bars: list[IntradayBar]) -> dict[dt.datetime, float]
     return values
 
 
-def is_limit_up(reference: float, price: float, threshold: float) -> bool:
-    return reference > 0 and price >= reference * (1 + threshold)
+def stock_limit_threshold(ticker: str, args: argparse.Namespace) -> float:
+    code = ticker.strip()[:6]
+    if code.startswith(("300", "301", "688")):
+        return float(args.growth_limit_threshold)
+    return float(args.mainboard_limit_threshold)
 
 
-def is_limit_down(reference: float, price: float, threshold: float) -> bool:
-    return reference > 0 and price <= reference * (1 - threshold)
+def round_to_tick(value: float, tick: float) -> float:
+    if value <= 0 or tick <= 0:
+        return 0.0
+    return round(math.floor(value / tick + 0.5 + 1e-9) * tick, 4)
+
+
+def round_buy_price(value: float, args: argparse.Namespace) -> float:
+    tick = float(args.price_tick)
+    if value <= 0 or tick <= 0:
+        return 0.0
+    return round(math.ceil((value - 1e-9) / tick) * tick, 4)
+
+
+def round_sell_price(value: float, args: argparse.Namespace) -> float:
+    tick = float(args.price_tick)
+    if value <= 0 or tick <= 0:
+        return 0.0
+    return round(math.floor((value + 1e-9) / tick) * tick, 4)
+
+
+def daily_limit_price(reference: float, threshold: float, direction: int, args: argparse.Namespace) -> float:
+    return round_to_tick(reference * (1 + direction * threshold), float(args.price_tick))
+
+
+def is_limit_up(reference: float, price: float, threshold: float, tick: float = 0.01) -> bool:
+    return reference > 0 and price >= round_to_tick(reference * (1 + threshold), tick) - tick / 2
+
+
+def is_limit_down(reference: float, price: float, threshold: float, tick: float = 0.01) -> bool:
+    return reference > 0 and price <= round_to_tick(reference * (1 - threshold), tick) + tick / 2
+
+
+def buy_execution_price(reference_price: float, args: argparse.Namespace) -> float:
+    return round_buy_price(reference_price * (1 + args.slippage_bps / 10000), args)
+
+
+def sell_execution_price(reference_price: float, args: argparse.Namespace) -> float:
+    return round_sell_price(reference_price * (1 - args.slippage_bps / 10000), args)
+
+
+def trade_fee(amount: float, side: str, args: argparse.Namespace) -> float:
+    if amount <= 0:
+        return 0.0
+    commission = amount * args.commission_bps / 10000
+    if args.min_commission > 0:
+        commission = max(args.min_commission, commission)
+    transfer_fee = amount * args.transfer_fee_bps / 10000
+    stamp_tax = amount * args.stamp_tax_bps / 10000 if side.upper() == "SELL" else 0.0
+    return commission + transfer_fee + stamp_tax
+
+
+def max_affordable_lot_shares(cash_budget: float, price: float, args: argparse.Namespace) -> tuple[int, float, float]:
+    lot_size = max(1, int(args.lot_size))
+    if cash_budget <= 0 or price <= 0:
+        return 0, 0.0, 0.0
+    shares = int(cash_budget // (price * lot_size)) * lot_size
+    while shares >= lot_size:
+        amount = shares * price
+        fee = trade_fee(amount, "BUY", args)
+        total_cost = amount + fee
+        if total_cost <= cash_budget + 1e-6:
+            return shares, total_cost, fee
+        shares -= lot_size
+    return 0, 0.0, 0.0
+
+
+def market_capital_factor(state: str, args: argparse.Namespace) -> float:
+    if state == "hot":
+        return max(0.0, min(1.0, float(args.hot_capital_factor)))
+    if state == "cold":
+        return max(0.0, min(1.0, float(args.cold_capital_factor)))
+    return max(0.0, min(1.0, float(args.normal_capital_factor)))
+
+
+def write_daily_cache(cache_dir: Path, ticker: str, fetch_start: dt.date, fetch_end: dt.date, bars: list[PriceBar]) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{ticker}_{fetch_start:%Y%m%d}_{fetch_end:%Y%m%d}.json"
+    cache_path.write_text(json.dumps(price_bars_to_dicts(bars), ensure_ascii=False), encoding="utf-8")
 
 
 def plan_trade_base(
@@ -219,9 +319,13 @@ def refine_trade_strict_10m(
         return None
     first_bar = entry_day_bars[0]
     gap_pct = first_bar.open / signal_close - 1 if signal_close else 0.0
+    limit_threshold = stock_limit_threshold(planned.ticker, args)
     if gap_pct > args.max_gap_up or gap_pct < -args.max_gap_down:
         return None
-    if args.reject_limit_open and (is_limit_up(signal_close, first_bar.open, args.limit_threshold) or is_limit_down(signal_close, first_bar.open, args.limit_threshold)):
+    if args.reject_limit_open and (
+        is_limit_up(signal_close, first_bar.open, limit_threshold, args.price_tick)
+        or is_limit_down(signal_close, first_bar.open, limit_threshold, args.price_tick)
+    ):
         return None
     if gap_pct > args.gap_volume_threshold and float(planned.features.get("traded_value_ratio") or 0.0) < args.gap_volume_min_ratio:
         return None
@@ -231,6 +335,7 @@ def refine_trade_strict_10m(
     entry_end = parse_clock(args.entry_end_time)
     entry_bar: IntradayBar | None = None
     entry_vwap = 0.0
+    entry_price = 0.0
     for bar in entry_day_bars:
         if bar.time < entry_start or bar.time > entry_end:
             continue
@@ -240,23 +345,25 @@ def refine_trade_strict_10m(
             continue
         if bar.close / signal_close - 1 > args.max_entry_extension:
             continue
-        if args.reject_limit_entry and is_limit_up(signal_close, bar.high, args.limit_threshold):
+        candidate_entry_price = buy_execution_price(bar.close, args)
+        if args.reject_limit_entry and is_limit_up(signal_close, candidate_entry_price, limit_threshold, args.price_tick):
             continue
         entry_bar = bar
         entry_vwap = current_vwap
+        entry_price = candidate_entry_price
         break
     if entry_bar is None:
         return None
 
-    entry_price = entry_bar.close * (1 + args.slippage_bps / 10000)
     first_sell_date = next_trading_date_after(daily_bars, planned.entry_date)
     if first_sell_date is None or first_sell_date > base_final_date:
         return None
     exit_bar = next((bar for bar in reversed(bars) if bar.date <= base_final_date), bars[-1])
-    exit_price = exit_bar.close * (1 - args.slippage_bps / 10000)
+    exit_price = sell_execution_price(exit_bar.close, args)
     exit_reason = "time_exit_10m"
     best_high = entry_price
     below_vwap_count = 0
+    limit_down_blocked_exits = 0
     for bar in bars:
         if bar.moment <= entry_bar.moment:
             continue
@@ -265,26 +372,30 @@ def refine_trade_strict_10m(
         if bar.date < first_sell_date:
             continue
         current_vwap = vwap_by_moment.get(bar.moment, bar.close)
+        previous_close = previous_close_before(daily_bars, bar.date) or entry_price
+        limit_down_blocked = args.reject_limit_exit and is_limit_down(previous_close, bar.close, limit_threshold, args.price_tick)
         if bar.low <= entry_price * (1 - planned.hard_stop_pct):
-            if args.reject_limit_exit and is_limit_down(entry_price, bar.low, args.limit_threshold):
-                exit_bar = bar
-                exit_price = bar.close * (1 - args.slippage_bps / 10000)
-                exit_reason = "limit_down_delayed_exit_10m"
+            if limit_down_blocked:
+                limit_down_blocked_exits += 1
                 continue
             exit_bar = bar
-            exit_price = entry_price * (1 - planned.hard_stop_pct) * (1 - args.slippage_bps / 10000)
+            raw_stop_price = max(entry_price * (1 - planned.hard_stop_pct), daily_limit_price(previous_close, limit_threshold, -1, args))
+            exit_price = sell_execution_price(raw_stop_price, args)
             exit_reason = "hard_stop_10m"
             break
         if bar.high >= entry_price * (1 + planned.target_pct):
             exit_bar = bar
-            exit_price = entry_price * (1 + planned.target_pct) * (1 - args.slippage_bps / 10000)
+            exit_price = sell_execution_price(entry_price * (1 + planned.target_pct), args)
             exit_reason = "take_profit_10m"
             break
         if best_high >= entry_price * (1 + max(0.04, planned.target_pct * 0.4)):
             trailing_price = best_high * (1 - planned.trailing_stop_pct)
             if bar.low <= trailing_price:
+                if limit_down_blocked:
+                    limit_down_blocked_exits += 1
+                    continue
                 exit_bar = bar
-                exit_price = trailing_price * (1 - args.slippage_bps / 10000)
+                exit_price = sell_execution_price(max(trailing_price, daily_limit_price(previous_close, limit_threshold, -1, args)), args)
                 exit_reason = "trailing_stop_10m"
                 break
         if bar.close < current_vwap * (1 - args.vwap_fail_buffer) and bar.close < entry_price:
@@ -292,8 +403,11 @@ def refine_trade_strict_10m(
         else:
             below_vwap_count = 0
         if args.vwap_fail_bars > 0 and below_vwap_count >= args.vwap_fail_bars:
+            if limit_down_blocked:
+                limit_down_blocked_exits += 1
+                continue
             exit_bar = bar
-            exit_price = bar.close * (1 - args.slippage_bps / 10000)
+            exit_price = sell_execution_price(max(bar.close, daily_limit_price(previous_close, limit_threshold, -1, args)), args)
             exit_reason = "vwap_fail_10m"
             break
 
@@ -306,6 +420,8 @@ def refine_trade_strict_10m(
             "entry_gap_pct": round(gap_pct * 100, 4),
             "execution_interval_minutes": 10,
             "slippage_bps": args.slippage_bps,
+            "limit_threshold_pct": round(limit_threshold * 100, 4),
+            "limit_down_blocked_exits": limit_down_blocked_exits,
         }
     )
     return replace(
@@ -374,15 +490,31 @@ def prefetch_intraday(required: dict[str, set[dt.date]], args: argparse.Namespac
     return intraday
 
 
-def marked_equity(cash: float, open_positions: list[tuple[PlannedTrade, float, float]], bar_maps: dict[str, dict[dt.date, PriceBar]], date_value: dt.date) -> float:
+def marked_equity(cash: float, open_positions: list[OpenPosition], bar_maps: dict[str, dict[dt.date, PriceBar]], date_value: dt.date, args: argparse.Namespace) -> float:
     total = cash
-    for planned, shares, _capital in open_positions:
+    for position in open_positions:
+        planned = position.planned
         bar = bar_maps.get(planned.ticker, {}).get(date_value)
-        total += shares * (bar.close if bar else planned.entry_price)
+        mark_price = bar.close if bar else planned.entry_price
+        amount = position.shares * mark_price
+        total += amount - trade_fee(amount, "SELL", args)
     return total
 
 
-def append_ledger_row(rows: list[dict[str, Any]], period: str, date_value: dt.date, action: str, planned: PlannedTrade, shares: float, price: float, cash: float, equity: float, note: str, realized_pnl: float = 0.0) -> None:
+def append_ledger_row(
+    rows: list[dict[str, Any]],
+    period: str,
+    date_value: dt.date,
+    action: str,
+    planned: PlannedTrade,
+    shares: int,
+    price: float,
+    fee: float,
+    cash: float,
+    equity: float,
+    note: str,
+    realized_pnl: float = 0.0,
+) -> None:
     rows.append(
         {
             "period": period,
@@ -391,9 +523,10 @@ def append_ledger_row(rows: list[dict[str, Any]], period: str, date_value: dt.da
             "action": action,
             "ticker": planned.ticker,
             "name": planned.name,
-            "shares": round(shares, 2),
-            "price": round(price, 4),
+            "shares": shares,
+            "price": round(price, 2),
             "amount": round(shares * price, 2),
+            "fee": round(fee, 2),
             "cash_after": round(cash, 2),
             "total_equity_after": round(equity, 2),
             "realized_pnl": round(realized_pnl, 2),
@@ -408,13 +541,14 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
     trading_dates = sorted({bar.date for bars in price_map.values() for bar in bars if start_date <= bar.date <= end_date})
     bar_maps = build_bar_maps(price_map)
     cash = args.initial_cash
-    open_positions: list[tuple[PlannedTrade, float, float]] = []
+    open_positions: list[OpenPosition] = []
     ledger: list[dict[str, Any]] = []
     daily: list[dict[str, Any]] = []
     closed_returns: list[float] = []
+    closed_pnls: list[float] = []
     cooldown_until: dt.date | None = None
-    fee_rate = args.fee_bps / 10000
     skipped_candidates = 0
+    skipped_no_lot = 0
 
     for date_value in trading_dates:
         temperature = market_temperature(price_map, date_value)
@@ -443,7 +577,7 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
                 break
             if len(open_positions) >= args.max_positions:
                 break
-            if any(position[0].ticker == raw_planned.ticker for position in open_positions):
+            if any(position.planned.ticker == raw_planned.ticker for position in open_positions):
                 continue
             if not planned_passes_dynamic_filters(raw_planned, overrides):
                 continue
@@ -457,26 +591,37 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
                 capital *= max(0.0, min(1.0, args.regime_risk_factor))
             if capital <= 0:
                 continue
-            shares = capital * (1 - fee_rate) / planned.entry_price
-            cash -= capital
-            open_positions.append((planned, shares, capital))
-            equity = marked_equity(cash, open_positions, bar_maps, date_value)
-            append_ledger_row(ledger, period, date_value, "BUY", planned, shares, planned.entry_price, cash, equity, f"score={planned.score:.1f}; market={temperature['state']}")
+            capital *= market_capital_factor(str(temperature["state"]), args)
+            if capital <= 0:
+                continue
+            shares, total_cost, buy_fee = max_affordable_lot_shares(capital, planned.entry_price, args)
+            if shares <= 0:
+                skipped_no_lot += 1
+                continue
+            cash -= total_cost
+            open_positions.append(OpenPosition(planned=planned, shares=shares, cost_basis=total_cost, buy_fee=buy_fee))
+            equity = marked_equity(cash, open_positions, bar_maps, date_value, args)
+            append_ledger_row(ledger, period, date_value, "BUY", planned, shares, planned.entry_price, buy_fee, cash, equity, f"score={planned.score:.1f}; market={temperature['state']}")
 
-        still_open: list[tuple[PlannedTrade, float, float]] = []
-        for planned, shares, capital in open_positions:
+        still_open: list[OpenPosition] = []
+        for position in open_positions:
+            planned = position.planned
             if planned.exit_date <= date_value:
-                proceeds = shares * planned.exit_price * (1 - fee_rate)
+                amount = position.shares * planned.exit_price
+                sell_fee = trade_fee(amount, "SELL", args)
+                proceeds = amount - sell_fee
                 cash += proceeds
-                pnl = proceeds - capital
-                closed_returns.append(planned.return_pct - args.fee_bps * 2 / 100)
-                equity = marked_equity(cash, still_open, bar_maps, date_value)
-                append_ledger_row(ledger, period, date_value, "SELL", planned, shares, planned.exit_price, cash, equity, "", pnl)
+                pnl = proceeds - position.cost_basis
+                net_return_pct = pnl / position.cost_basis * 100 if position.cost_basis else 0.0
+                closed_returns.append(net_return_pct)
+                closed_pnls.append(pnl)
+                equity = marked_equity(cash, still_open, bar_maps, date_value, args)
+                append_ledger_row(ledger, period, date_value, "SELL", replace(planned, return_pct=net_return_pct), position.shares, planned.exit_price, sell_fee, cash, equity, "", pnl)
             else:
-                still_open.append((planned, shares, capital))
+                still_open.append(position)
         open_positions = still_open
 
-        equity = marked_equity(cash, open_positions, bar_maps, date_value)
+        equity = marked_equity(cash, open_positions, bar_maps, date_value, args)
         daily.append(
             {
                 "period": period,
@@ -492,6 +637,8 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
     final_equity = float(daily[-1]["total_equity"]) if daily else args.initial_cash
     wins = sum(1 for value in closed_returns if value > 0)
     closed = len(closed_returns)
+    gross_profit = sum(value for value in closed_pnls if value > 0)
+    gross_loss = -sum(value for value in closed_pnls if value < 0)
     summary = {
         "period": period,
         "start_date": trading_dates[0].isoformat() if trading_dates else start_date.isoformat(),
@@ -505,8 +652,20 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "win_rate_pct": round(wins / closed * 100, 4) if closed else 0.0,
         "open_positions_end": len(open_positions),
         "skipped_after_intraday_filters": skipped_candidates,
+        "skipped_no_lot": skipped_no_lot,
         "interval_minutes": 10,
         "slippage_bps": args.slippage_bps,
+        "lot_size": args.lot_size,
+        "price_tick": args.price_tick,
+        "commission_bps": args.commission_bps,
+        "min_commission": args.min_commission,
+        "stamp_tax_bps": args.stamp_tax_bps,
+        "transfer_fee_bps": args.transfer_fee_bps,
+        "hot_capital_factor": args.hot_capital_factor,
+        "normal_capital_factor": args.normal_capital_factor,
+        "cold_capital_factor": args.cold_capital_factor,
+        "avg_trade_return_pct": round(sum(closed_returns) / closed, 4) if closed else 0.0,
+        "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss else 0.0,
         "event_file": "disabled",
         "event_weight": 0,
     }
@@ -520,7 +679,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-date", default=default_end_date().isoformat())
     parser.add_argument("--period-months", default="1,3,6")
     parser.add_argument("--initial-cash", type=float, default=100000.0)
-    parser.add_argument("--max-positions", type=int, default=2)
+    parser.add_argument("--max-positions", type=int, default=3)
     parser.add_argument("--min-score", type=float, default=90.0)
     parser.add_argument("--selection-mode", choices=["score", "score_quality", "quality", "score_low_heat"], default="score")
     parser.add_argument("--setups", default="VOLUME_BREAKOUT,HIGH_VOLATILITY")
@@ -533,15 +692,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-range-mult", type=float, default=0.35)
     parser.add_argument("--target-min", type=float, default=0.05)
     parser.add_argument("--target-max", type=float, default=0.18)
-    parser.add_argument("--stop-atr-mult", type=float, default=0.55)
-    parser.add_argument("--stop-min", type=float, default=0.025)
+    parser.add_argument("--stop-atr-mult", type=float, default=0.45)
+    parser.add_argument("--stop-min", type=float, default=0.02)
     parser.add_argument("--stop-max", type=float, default=0.07)
     parser.add_argument("--trail-atr-mult", type=float, default=0.25)
     parser.add_argument("--trail-min", type=float, default=0.025)
     parser.add_argument("--trail-max", type=float, default=0.06)
-    parser.add_argument("--fee-bps", type=float, default=5.0)
+    parser.add_argument("--fee-bps", type=float, default=0.0, help=argparse.SUPPRESS)
+    parser.add_argument("--commission-bps", type=float, default=3.0)
+    parser.add_argument("--min-commission", type=float, default=5.0)
+    parser.add_argument("--stamp-tax-bps", type=float, default=5.0)
+    parser.add_argument("--transfer-fee-bps", type=float, default=0.1)
     parser.add_argument("--slippage-bps", type=float, default=10.0)
-    parser.add_argument("--limit-threshold", type=float, default=0.095)
+    parser.add_argument("--price-tick", type=float, default=0.01)
+    parser.add_argument("--lot-size", type=int, default=100)
+    parser.add_argument("--limit-threshold", type=float, default=0.0, help=argparse.SUPPRESS)
+    parser.add_argument("--mainboard-limit-threshold", type=float, default=0.10)
+    parser.add_argument("--growth-limit-threshold", type=float, default=0.20)
     parser.add_argument("--reject-limit-open", action="store_true", default=True)
     parser.add_argument("--reject-limit-entry", action="store_true", default=True)
     parser.add_argument("--reject-limit-exit", action="store_true", default=True)
@@ -570,11 +737,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap-volume-threshold", type=float, default=0.0)
     parser.add_argument("--gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--confirm-buffer", type=float, default=0.0)
-    parser.add_argument("--vwap-buffer", type=float, default=0.001)
+    parser.add_argument("--vwap-buffer", type=float, default=0.003)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
-    parser.add_argument("--vwap-fail-bars", type=int, default=3)
+    parser.add_argument("--vwap-fail-bars", type=int, default=1)
     parser.add_argument("--vwap-fail-buffer", type=float, default=0.001)
     parser.add_argument("--dynamic-params", action="store_true", default=True)
+    parser.add_argument("--hot-capital-factor", type=float, default=0.0)
+    parser.add_argument("--normal-capital-factor", type=float, default=1.0)
+    parser.add_argument("--cold-capital-factor", type=float, default=0.75)
     parser.add_argument("--hot-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--hot-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--hot-max-close-position-20d-pct", type=float, default=85.0)
@@ -586,6 +756,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cold-max-close-position-20d-pct", type=float, default=80.0)
     parser.add_argument("--history-timeout", type=float, default=5.0)
     parser.add_argument("--daily-cache-dir", default="output/backtest_daily_cache")
+    parser.add_argument("--disable-baostock-daily-fallback", action="store_true")
     parser.add_argument("--baostock-cache-dir", default="output/baostock_5m_cache")
     parser.add_argument("--baostock-sleep-seconds", type=float, default=0.15)
     parser.add_argument("--out-dir", default="output/backtest_strict_10m")
@@ -605,14 +776,31 @@ def main() -> int:
     session = requests.Session()
     session.headers.update(DEFAULT_HEADERS)
     price_map: dict[str, list[PriceBar]] = {}
-    for index, symbol in enumerate(symbols, 1):
-        try:
-            price_map[symbol.ticker] = cached_history(session, symbol.yahoo_symbol or symbol.ticker, symbol.ticker, fetch_start, fetch_end, Path(args.daily_cache_dir), args.history_timeout)
-        except Exception as exc:
-            print(f"warning: daily history failed {index}/{len(symbols)} {symbol.ticker}: {type(exc).__name__}: {exc}", flush=True)
-            price_map[symbol.ticker] = []
-        if index == 1 or index % 50 == 0 or index == len(symbols):
-            print(f"loaded daily {index}/{len(symbols)}", flush=True)
+    daily_cache_dir = Path(args.daily_cache_dir)
+    baostock_daily_client: BaoStockDailyClient | None = None
+    try:
+        for index, symbol in enumerate(symbols, 1):
+            bars: list[PriceBar] = []
+            try:
+                bars = cached_history(session, symbol.yahoo_symbol or symbol.ticker, symbol.ticker, fetch_start, fetch_end, daily_cache_dir, args.history_timeout)
+                last_date = max((bar.date for bar in bars), default=None)
+                if not args.disable_baostock_daily_fallback and (last_date is None or last_date < end_date):
+                    if baostock_daily_client is None:
+                        baostock_daily_client = BaoStockDailyClient()
+                        baostock_daily_client.login()
+                    fallback_bars = baostock_daily_client.fetch_history(symbol.ticker, fetch_start, end_date)
+                    fallback_last = max((bar.date for bar in fallback_bars), default=None)
+                    if fallback_bars and (last_date is None or (fallback_last is not None and fallback_last >= last_date)):
+                        bars = fallback_bars
+                        write_daily_cache(daily_cache_dir, symbol.ticker, fetch_start, fetch_end, bars)
+            except Exception as exc:
+                print(f"warning: daily history failed {index}/{len(symbols)} {symbol.ticker}: {type(exc).__name__}: {exc}", flush=True)
+            price_map[symbol.ticker] = bars
+            if index == 1 or index % 50 == 0 or index == len(symbols):
+                print(f"loaded daily {index}/{len(symbols)}", flush=True)
+    finally:
+        if baostock_daily_client is not None:
+            baostock_daily_client.logout()
 
     all_planned: dict[dt.date, list[PlannedTrade]] = {}
     period_planned: dict[int, dict[dt.date, list[PlannedTrade]]] = {}

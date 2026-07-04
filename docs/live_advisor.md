@@ -47,10 +47,12 @@ python live_advisor_daemon.py --once --github-mode issue --github-issue-title "A
 ## Current dynamic model
 
 - A-share T+1 execution.
-- Buyable universe: `600`, `300`, `301`.
-- Hot/normal market: trade with current main filters.
-- Cold market: no new entries.
-- Entry window: `09:45` to `11:15`.
+- Default buyable universe: liquid mainboard-style symbols with prefixes
+  `000`, `001`, `002`, `003`, `600`, `601`, `603`, `605`.
+- Hot market: skip new entries.
+- Normal market: trade with current main filters.
+- Cold market: allow entries with reduced risk sizing in strict backtests.
+- Entry window: `09:45` to `11:20`.
+- Buy confirmation requires both the trigger and buffered VWAP.
 - Positive open gap requires signal-day value ratio `>= 1.30`.
 - Main filters: 5-day range `<= 32`, 10-day momentum `<= 26`, 20-day position `<= 85`.
-
