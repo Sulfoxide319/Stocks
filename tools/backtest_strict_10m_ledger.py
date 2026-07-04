@@ -308,6 +308,36 @@ def return_bucket(value: float) -> str:
     return ">7.2%"
 
 
+def numeric_bucket(value: object, buckets: tuple[tuple[float, float, str], ...], missing_label: str = "missing") -> str:
+    numeric = safe_float(value)
+    if value in {None, ""}:
+        return missing_label
+    for low, high, label in buckets:
+        if low <= numeric < high:
+            return label
+    return buckets[-1][2] if buckets else missing_label
+
+
+def time_bucket(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "missing"
+    try:
+        hour, minute = text.split(":", 1)
+        minutes = int(hour) * 60 + int(minute[:2])
+    except (ValueError, IndexError):
+        return "invalid"
+    if minutes <= 9 * 60 + 50:
+        return "<=09:50"
+    if minutes <= 10 * 60 + 10:
+        return "09:51~10:10"
+    if minutes <= 10 * 60 + 40:
+        return "10:11~10:40"
+    if minutes <= 11 * 60 + 20:
+        return "10:41~11:20"
+    return ">11:20"
+
+
 def truthy(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
@@ -385,6 +415,298 @@ def build_distribution_rows(ledger: list[dict[str, Any]]) -> list[dict[str, Any]
             group_sells = [row for row in period_sells if return_bucket(safe_float(row.get("return_pct"))) == bucket]
             rows.append(summarize_distribution_group(period, "return_bucket", bucket, group_sells, []))
     return rows
+
+
+CONDITION_BUCKETS: tuple[tuple[str, str, tuple[tuple[float, float, str], ...]], ...] = (
+    (
+        "score",
+        "score",
+        (
+            (float("-inf"), 87.0, "<87"),
+            (87.0, 90.0, "87~90"),
+            (90.0, 93.0, "90~93"),
+            (93.0, 96.0, "93~96"),
+            (96.0, float("inf"), ">=96"),
+        ),
+    ),
+    (
+        "entry_gap",
+        "entry_gap_pct",
+        (
+            (float("-inf"), -1.0, "<-1%"),
+            (-1.0, 0.0, "-1~0%"),
+            (0.0, 1.0, "0~1%"),
+            (1.0, 2.0, "1~2%"),
+            (2.0, float("inf"), ">2%"),
+        ),
+    ),
+    (
+        "entry_vwap_distance",
+        "entry_vwap_distance_pct",
+        (
+            (float("-inf"), 0.0, "<0%"),
+            (0.0, 0.2, "0~0.2%"),
+            (0.2, 0.5, "0.2~0.5%"),
+            (0.5, 1.0, "0.5~1%"),
+            (1.0, float("inf"), ">1%"),
+        ),
+    ),
+    (
+        "traded_value_ratio",
+        "traded_value_ratio",
+        (
+            (float("-inf"), 1.2, "<1.2x"),
+            (1.2, 1.5, "1.2~1.5x"),
+            (1.5, 2.0, "1.5~2.0x"),
+            (2.0, 3.0, "2.0~3.0x"),
+            (3.0, float("inf"), ">=3.0x"),
+        ),
+    ),
+    (
+        "atr",
+        "atr_pct",
+        (
+            (float("-inf"), 4.1, "<4.1%"),
+            (4.1, 5.5, "4.1~5.5%"),
+            (5.5, 7.0, "5.5~7%"),
+            (7.0, float("inf"), ">=7%"),
+        ),
+    ),
+    (
+        "max_5d_range",
+        "max_5d_range_pct",
+        (
+            (float("-inf"), 10.0, "<10%"),
+            (10.0, 18.0, "10~18%"),
+            (18.0, 25.0, "18~25%"),
+            (25.0, float("inf"), ">=25%"),
+        ),
+    ),
+    (
+        "momentum_10d",
+        "momentum_10d_pct",
+        (
+            (float("-inf"), 0.0, "<0%"),
+            (0.0, 10.0, "0~10%"),
+            (10.0, 20.0, "10~20%"),
+            (20.0, 26.0, "20~26%"),
+            (26.0, float("inf"), ">=26%"),
+        ),
+    ),
+    (
+        "close_position_20d",
+        "close_position_20d_pct",
+        (
+            (float("-inf"), 50.0, "<50%"),
+            (50.0, 70.0, "50~70%"),
+            (70.0, 85.0, "70~85%"),
+            (85.0, float("inf"), ">=85%"),
+        ),
+    ),
+    (
+        "sector_momentum_5d",
+        "sector_momentum_5d_pct",
+        (
+            (float("-inf"), 0.0, "<0%"),
+            (0.0, 3.0, "0~3%"),
+            (3.0, 6.0, "3~6%"),
+            (6.0, float("inf"), ">=6%"),
+        ),
+    ),
+    (
+        "sector_above_ma20",
+        "sector_above_ma20_ratio",
+        (
+            (float("-inf"), 0.35, "<35%"),
+            (0.35, 0.55, "35~55%"),
+            (0.55, 0.70, "55~70%"),
+            (0.70, float("inf"), ">=70%"),
+        ),
+    ),
+)
+
+
+def median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def realized_pnl_for_row(row: dict[str, Any]) -> float:
+    total = safe_float(row.get("trade_total_realized_pnl"))
+    if total:
+        return total
+    return safe_float(row.get("realized_pnl"))
+
+
+def summarize_condition_group(
+    period: str,
+    condition: str,
+    bucket: str,
+    rows: list[dict[str, Any]],
+    baseline: dict[str, float],
+) -> dict[str, Any]:
+    returns = [safe_float(row.get("return_pct")) for row in rows]
+    pnls = [realized_pnl_for_row(row) for row in rows]
+    trades = len(rows)
+    wins = sum(1 for value in returns if value > 0)
+    losses = trades - wins
+    gross_profit = sum(value for value in pnls if value > 0)
+    gross_loss = -sum(value for value in pnls if value < 0)
+    first_manage_hits = sum(1 for row in rows if truthy(row.get("first_manage_hit")))
+    target_hits = sum(1 for row in rows if str(row.get("reason", "")).startswith("take_profit"))
+    hard_stops = sum(1 for row in rows if str(row.get("reason", "")).startswith("hard_stop"))
+    vwap_fails = sum(1 for row in rows if str(row.get("reason", "")).startswith("vwap_fail"))
+    trailing_stops = sum(1 for row in rows if str(row.get("reason", "")).startswith("trailing_stop"))
+    avg_return = sum(returns) / trades if trades else 0.0
+    win_rate = wins / trades * 100 if trades else 0.0
+    sample_warning = "low_sample" if trades < 10 else ""
+    return {
+        "period": period,
+        "condition": condition,
+        "bucket": bucket,
+        "closed_trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": round(win_rate, 4) if trades else 0.0,
+        "avg_return_pct": round(avg_return, 4) if trades else 0.0,
+        "median_return_pct": round(median(returns), 4) if trades else 0.0,
+        "total_realized_pnl": round(sum(pnls), 2),
+        "avg_realized_pnl": round(sum(pnls) / trades, 2) if trades else 0.0,
+        "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss else (999.0 if gross_profit > 0 else 0.0),
+        "target_upper_hit_rate_pct": round(target_hits / trades * 100, 4) if trades else 0.0,
+        "first_manage_hit_rate_pct": round(first_manage_hits / trades * 100, 4) if trades else 0.0,
+        "hard_stop_rate_pct": round(hard_stops / trades * 100, 4) if trades else 0.0,
+        "vwap_fail_rate_pct": round(vwap_fails / trades * 100, 4) if trades else 0.0,
+        "trailing_stop_rate_pct": round(trailing_stops / trades * 100, 4) if trades else 0.0,
+        "avg_return_lift_pct": round(avg_return - baseline.get("avg_return_pct", 0.0), 4),
+        "win_rate_lift_pct": round(win_rate - baseline.get("win_rate_pct", 0.0), 4),
+        "sample_warning": sample_warning,
+    }
+
+
+def condition_value(row: dict[str, Any], condition: str, field: str, buckets: tuple[tuple[float, float, str], ...]) -> str:
+    if condition == "entry_time":
+        return time_bucket(row.get(field))
+    return numeric_bucket(row.get(field), buckets)
+
+
+def build_condition_diagnostic_rows(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sells = [row for row in ledger if row.get("action") == "SELL"]
+    periods = sorted({str(row.get("period", "")) for row in sells}, key=period_sort_key)
+    rows: list[dict[str, Any]] = []
+    categorical_fields = (
+        ("market_state", "market_state"),
+        ("setup_type", "setup_type"),
+        ("sector_group", "sector_group"),
+        ("exit_reason", "reason"),
+        ("entry_time", "entry_time"),
+    )
+    for period in periods:
+        period_sells = [row for row in sells if str(row.get("period", "")) == period]
+        if not period_sells:
+            continue
+        returns = [safe_float(row.get("return_pct")) for row in period_sells]
+        wins = sum(1 for value in returns if value > 0)
+        baseline = {
+            "avg_return_pct": sum(returns) / len(returns),
+            "win_rate_pct": wins / len(returns) * 100,
+        }
+        for condition, field in categorical_fields:
+            if condition == "entry_time":
+                values = sorted({time_bucket(row.get(field)) for row in period_sells})
+                for value in values:
+                    group = [row for row in period_sells if time_bucket(row.get(field)) == value]
+                    rows.append(summarize_condition_group(period, condition, value, group, baseline))
+                continue
+            values = sorted({str(row.get(field, "") or "unknown") for row in period_sells})
+            for value in values:
+                group = [row for row in period_sells if str(row.get(field, "") or "unknown") == value]
+                rows.append(summarize_condition_group(period, condition, value, group, baseline))
+        for condition, field, buckets in CONDITION_BUCKETS:
+            values = [label for _low, _high, label in buckets]
+            if any(row.get(field) in {None, ""} for row in period_sells):
+                values.append("missing")
+            for value in values:
+                group = [row for row in period_sells if condition_value(row, condition, field, buckets) == value]
+                if not group:
+                    continue
+                rows.append(summarize_condition_group(period, condition, value, group, baseline))
+    return rows
+
+
+def write_condition_diagnostic_outputs(out_dir: Path, prefix: str, ledger: list[dict[str, Any]]) -> dict[str, Path]:
+    rows = build_condition_diagnostic_rows(ledger)
+    csv_path = out_dir / f"{prefix}_condition_diagnostics.csv"
+    md_path = out_dir / f"{prefix}_condition_diagnostics.md"
+    fieldnames = list(rows[0].keys()) if rows else [
+        "period",
+        "condition",
+        "bucket",
+        "closed_trades",
+        "wins",
+        "losses",
+        "win_rate_pct",
+        "avg_return_pct",
+        "median_return_pct",
+        "total_realized_pnl",
+        "avg_realized_pnl",
+        "profit_factor",
+        "target_upper_hit_rate_pct",
+        "first_manage_hit_rate_pct",
+        "hard_stop_rate_pct",
+        "vwap_fail_rate_pct",
+        "trailing_stop_rate_pct",
+        "avg_return_lift_pct",
+        "win_rate_lift_pct",
+        "sample_warning",
+    ]
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    lines = [
+        f"# Strict 10m Condition Diagnostics - {prefix}",
+        "",
+        "Rows compare each condition bucket against the same-period overall average. Small buckets are marked `low_sample`.",
+        "",
+        "## Negative Buckets",
+        "",
+        "| Period | Condition | Bucket | Trades | Avg Return% | Lift% | Win% | First Manage Hit% | Hard Stop% | VWAP Fail% | Warning |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    negative_rows = sorted(
+        [row for row in rows if row["closed_trades"] >= 5 and row["avg_return_lift_pct"] < 0],
+        key=lambda item: (period_sort_key(item["period"]), item["avg_return_lift_pct"]),
+    )
+    for row in negative_rows[:40]:
+        lines.append(
+            f"| {row['period']} | {row['condition']} | {row['bucket']} | {row['closed_trades']} | {row['avg_return_pct']:.2f} | {row['avg_return_lift_pct']:.2f} | {row['win_rate_pct']:.2f} | {row['first_manage_hit_rate_pct']:.2f} | {row['hard_stop_rate_pct']:.2f} | {row['vwap_fail_rate_pct']:.2f} | {row['sample_warning']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Positive Buckets",
+            "",
+            "| Period | Condition | Bucket | Trades | Avg Return% | Lift% | Win% | Target Hit% | First Manage Hit% | Profit Factor | Warning |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    positive_rows = sorted(
+        [row for row in rows if row["closed_trades"] >= 5 and row["avg_return_lift_pct"] > 0],
+        key=lambda item: (period_sort_key(item["period"]), -item["avg_return_lift_pct"]),
+    )
+    for row in positive_rows[:40]:
+        lines.append(
+            f"| {row['period']} | {row['condition']} | {row['bucket']} | {row['closed_trades']} | {row['avg_return_pct']:.2f} | {row['avg_return_lift_pct']:.2f} | {row['win_rate_pct']:.2f} | {row['target_upper_hit_rate_pct']:.2f} | {row['first_manage_hit_rate_pct']:.2f} | {row['profit_factor']:.2f} | {row['sample_warning']} |"
+        )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"condition_diagnostics_csv": csv_path, "condition_diagnostics_md": md_path}
 
 
 def write_distribution_outputs(out_dir: Path, prefix: str, ledger: list[dict[str, Any]]) -> dict[str, Path]:
@@ -1046,7 +1368,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--partial-sell-ratio-cold", type=float, default=0.5)
     parser.add_argument("--partial-sell-ratio-narrow-rally", type=float, default=0.3)
     parser.add_argument("--cold-min-traded-value-ratio", type=float, default=0.0)
-    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=-999.0)
+    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=5.0)
     parser.add_argument("--cold-min-sector-momentum-5d-pct", type=float, default=-999.0)
     parser.add_argument("--normal-min-5d-range-pct", type=float, default=0.0)
     parser.add_argument("--normal-min-atr-pct", type=float, default=4.1)
@@ -1090,7 +1412,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-gap-up", type=float, default=0.02)
     parser.add_argument("--max-gap-down", type=float, default=0.03)
     parser.add_argument("--gap-volume-threshold", type=float, default=0.0)
-    parser.add_argument("--gap-volume-min-ratio", type=float, default=1.3)
+    parser.add_argument("--gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--confirm-buffer", type=float, default=0.0)
     parser.add_argument("--vwap-buffer", type=float, default=0.003)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
@@ -1102,19 +1424,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cold-capital-factor", type=float, default=0.9)
     parser.add_argument("--hot-min-score", type=float, default=90.0)
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
-    parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.3)
+    parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--hot-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--hot-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--hot-max-close-position-20d-pct", type=float, default=85.0)
     parser.add_argument("--normal-min-score", type=float, default=90.0)
     parser.add_argument("--normal-max-gap-up", type=float, default=0.02)
-    parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.3)
+    parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--normal-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--normal-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--normal-max-close-position-20d-pct", type=float, default=85.0)
     parser.add_argument("--narrow-rally-min-score", type=float, default=90.0)
     parser.add_argument("--narrow-rally-max-gap-up", type=float, default=0.01)
-    parser.add_argument("--narrow-rally-gap-volume-min-ratio", type=float, default=1.35)
+    parser.add_argument("--narrow-rally-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--narrow-rally-max-5d-range-pct", type=float, default=25.0)
     parser.add_argument("--narrow-rally-max-momentum-10d-pct", type=float, default=20.0)
     parser.add_argument("--narrow-rally-max-close-position-20d-pct", type=float, default=80.0)
@@ -1207,6 +1529,7 @@ def main() -> int:
     prefix = f"strict_10m_no_events_{min(periods)}M_{max(periods)}M_to_{end_date:%Y%m%d}"
     outputs = write_outputs(Path(args.out_dir), prefix, all_ledger, all_daily, summaries)
     outputs.update(write_distribution_outputs(Path(args.out_dir), prefix, all_ledger))
+    outputs.update(write_condition_diagnostic_outputs(Path(args.out_dir), prefix, all_ledger))
     for name, path in outputs.items():
         print(f"{name}={path}", flush=True)
     return 0

@@ -397,7 +397,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-gap-up", type=float, default=0.03)
     parser.add_argument("--max-gap-down", type=float, default=0.03)
     parser.add_argument("--gap-volume-threshold", type=float, default=0.0)
-    parser.add_argument("--gap-volume-min-ratio", type=float, default=0.0)
+    parser.add_argument("--gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--confirm-buffer", type=float, default=0.0)
     parser.add_argument("--vwap-buffer", type=float, default=0.003)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
@@ -408,26 +408,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-hot-entries", action="store_true")
     parser.add_argument("--hot-min-score", type=float, default=90.0)
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
-    parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.3)
+    parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--hot-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--hot-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--hot-max-close-position-20d-pct", type=float, default=85.0)
     parser.add_argument("--normal-min-score", type=float, default=87.0)
     parser.add_argument("--normal-max-gap-up", type=float, default=0.02)
-    parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.3)
+    parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--normal-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--normal-min-atr-pct", type=float, default=4.1)
     parser.add_argument("--normal-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--normal-max-close-position-20d-pct", type=float, default=85.0)
     parser.add_argument("--narrow-rally-min-score", type=float, default=83.0)
     parser.add_argument("--narrow-rally-max-gap-up", type=float, default=0.01)
-    parser.add_argument("--narrow-rally-gap-volume-min-ratio", type=float, default=1.35)
+    parser.add_argument("--narrow-rally-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--narrow-rally-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--narrow-rally-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--narrow-rally-max-close-position-20d-pct", type=float, default=88.0)
     parser.add_argument("--cold-min-score", type=float, default=87.0)
     parser.add_argument("--cold-max-gap-up", type=float, default=-1.0)
-    parser.add_argument("--cold-gap-volume-min-ratio", type=float, default=99.0)
+    parser.add_argument("--cold-gap-volume-min-ratio", type=float, default=1.5)
+    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=5.0)
     parser.add_argument("--cold-max-5d-range-pct", type=float, default=1.0)
     parser.add_argument("--cold-max-momentum-10d-pct", type=float, default=1.0)
     parser.add_argument("--cold-max-close-position-20d-pct", type=float, default=1.0)
@@ -554,6 +555,7 @@ def main() -> int:
     active_min_score = float(overrides.get("min_score", args.min_score))
     active_max_5d_range = float(overrides.get("max_5d_range_pct", args.max_5d_range_pct))
     active_min_atr = float(args.normal_min_atr_pct) if str(temperature["state"]) == "normal" else 0.0
+    active_min_momentum_10d = float(args.cold_min_momentum_10d_pct) if str(temperature["state"]) == "cold" else -999.0
     active_max_momentum_10d = float(overrides.get("max_momentum_10d_pct", args.max_momentum_10d_pct))
     active_max_close_position = float(overrides.get("max_close_position_20d_pct", args.max_close_position_20d_pct))
 
@@ -563,6 +565,7 @@ def main() -> int:
         "no_signal_row": 0,
         "range_too_wide": 0,
         "atr_too_low": 0,
+        "momentum10_too_low": 0,
         "momentum10_too_high": 0,
         "close_position_too_high": 0,
         "score_below_min": 0,
@@ -595,6 +598,9 @@ def main() -> int:
                 continue
             if active_min_atr > 0 and row.atr_pct < active_min_atr:
                 filter_counts["atr_too_low"] += 1
+                continue
+            if active_min_momentum_10d > -999 and row.momentum_10d_pct < active_min_momentum_10d:
+                filter_counts["momentum10_too_low"] += 1
                 continue
             if active_max_momentum_10d < 999 and row.momentum_10d_pct > active_max_momentum_10d:
                 filter_counts["momentum10_too_high"] += 1
@@ -737,7 +743,7 @@ def main() -> int:
         f"- Intraday data status: `{intraday_status}`",
         f"- Quote fallback: `{args.quote_fallback}`",
         f"- Entry window end: `{entry_end.isoformat(timespec='minutes')}`",
-        f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, atr>=`{active_min_atr:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
+        f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, atr>=`{active_min_atr:.1f}`, momentum10>=`{active_min_momentum_10d:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
         "",
         "## Filter Funnel",
         "",
@@ -747,6 +753,7 @@ def main() -> int:
         f"| No signal row / insufficient history | {filter_counts['no_signal_row']} |",
         f"| 5-day range too wide | {filter_counts['range_too_wide']} |",
         f"| ATR too low | {filter_counts['atr_too_low']} |",
+        f"| 10-day momentum too low | {filter_counts['momentum10_too_low']} |",
         f"| 10-day momentum too high | {filter_counts['momentum10_too_high']} |",
         f"| 20-day close position too high | {filter_counts['close_position_too_high']} |",
         f"| Score below min | {filter_counts['score_below_min']} |",
