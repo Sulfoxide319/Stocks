@@ -20,7 +20,7 @@ A candidate may become default only if:
 |---:|---|---|---|
 | 1 | Keep buy universe liquid mainboard only; never write `300/301` buy candidates. | Done, ongoing invariant | v0.4.22+ validation checks |
 | 2 | Separate `目标上沿`, first management line, and actual exit probability in UI/reporting. | Done | v0.4.23, v0.4.24 |
-| 3 | Add official low-noise event scoring without allowing events to bypass VWAP/score/mainboard filters. | Mechanism added; impact still needs expanded validation | v0.4.24 |
+| 3 | Add official low-noise event scoring without allowing events to bypass VWAP/score/mainboard filters. | Audited; current US event samples have no A-share watchlist overlap, so no default trading impact | v0.4.24, v0.4.35 |
 | 4 | Expose practical sell signal points: target upper, first management, trailing stop, hard stop, VWAP/cost weakness, pre-close weakness. | Done | v0.4.26 |
 | 5 | Persist holding management state so repeated scans do not spam first-touch prompts. | Done | v0.4.27 |
 | 6 | Add condition diagnostics for market state, entry timing, volatility, momentum, sector, and exit reason. | Done | v0.4.28 |

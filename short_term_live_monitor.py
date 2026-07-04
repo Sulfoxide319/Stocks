@@ -9,7 +9,7 @@ import datetime as dt
 import math
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from dependency_bootstrap import ensure_project_dependencies
 
@@ -465,6 +465,15 @@ def main() -> int:
     monitor_progress("读取事件评分")
     event_context = resolve_event_scores(args.events, today, args.max_event_age_days)
     event_scores = event_context.scores
+    if event_scores:
+        watchlist_tickers = {symbol.ticker for symbol in symbols}
+        event_overlap = sorted(set(event_scores).intersection(watchlist_tickers))
+        if not event_overlap:
+            event_context = replace(
+                event_context,
+                status="no_watchlist_overlap",
+                warning="event_scores_have_no_watchlist_overlap",
+            )
     fetch_start = today - dt.timedelta(days=args.lookback_days)
     price_map: dict[str, list[PriceBar]] = {}
     total_symbols = len(symbols)
@@ -757,7 +766,7 @@ def main() -> int:
         f"- Universe: `{args.watchlist}`",
         f"- Candidates: `{len(candidates)}`",
         f"- Market state: `{temperature['state']}` breadth_ma20=`{temperature['breadth_ma20']:.2%}` avg5d=`{temperature['avg_5d_return']:.2%}`",
-        f"- Event score source: `{event_context.path or '-'}` status=`{event_context.status}` age_days=`{event_context.age_days if event_context.age_days is not None else '-'}`",
+        f"- Event score source: `{event_context.path or '-'}` status=`{event_context.status}` age_days=`{event_context.age_days if event_context.age_days is not None else '-'}` warning=`{event_context.warning or '-'}`",
         f"- Intraday data status: `{intraday_status}`",
         f"- Quote fallback: `{args.quote_fallback}`",
         f"- Entry window end: `{entry_end.isoformat(timespec='minutes')}`",
