@@ -118,6 +118,7 @@ class SellAdvice:
     latest_price: float
     vwap: float
     target_price: float
+    first_manage_price: float
     hard_stop_price: float
     highest_price: float
     pnl_pct: float
@@ -165,6 +166,13 @@ def parse_float(value: object, default: float = 0.0) -> float:
 
 def first_manage_pct_from_target(target_pct: float) -> float:
     return max(4.0, target_pct * 0.4)
+
+
+def first_manage_price_from_position(buy_price: float, target_price: float) -> float:
+    if buy_price <= 0 or target_price <= buy_price:
+        return 0.0
+    target_pct = (target_price / buy_price - 1) * 100
+    return buy_price * (1 + first_manage_pct_from_target(target_pct) / 100)
 
 
 def target_context_note(first_manage_price: float, target_hit_rate: float, first_manage_hit_rate: float, buy_enabled: bool) -> str:
@@ -458,13 +466,16 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
             buy_date = row.get("buy_date", "")
             buy_price = parse_float(row.get("buy_price"))
             target_price = parse_float(row.get("target_price"))
+            first_manage_price = parse_float(row.get("first_manage_price"))
             hard_stop_price = parse_float(row.get("hard_stop_price"))
             trailing_stop_pct = parse_float(row.get("trailing_stop_pct"), 3.0)
             previous_highest = parse_float(row.get("highest_price"), buy_price)
+            if first_manage_price <= 0:
+                first_manage_price = first_manage_price_from_position(buy_price, target_price)
             latest, vwap, intraday_high, latest_time = latest_vwap_for_position(client, ticker, today)
             if latest <= 0:
                 advices.append(
-                    SellAdvice(ticker, row.get("name", ""), "HOLD_NO_INTRADAY", buy_date, buy_price, 0.0, 0.0, target_price, hard_stop_price, previous_highest, 0.0, "暂无5分钟线，不能确认卖点")
+                    SellAdvice(ticker, row.get("name", ""), "HOLD_NO_INTRADAY", buy_date, buy_price, 0.0, 0.0, target_price, first_manage_price, hard_stop_price, previous_highest, 0.0, "暂无5分钟线，不能确认卖点")
                 )
                 continue
             highest = max(previous_highest, intraday_high, latest)
@@ -473,15 +484,27 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                 changed = True
             pnl_pct = (latest / buy_price - 1) * 100 if buy_price else 0.0
             same_day = buy_date == today.isoformat()
+            first_manage_hit = first_manage_price > 0 and highest >= first_manage_price
             if same_day:
                 action = "HOLD_T1"
                 reason = "A股T+1，今天买入的仓位今天不能卖"
+                if first_manage_hit:
+                    reason += f"；已触及第一管理线 {first_manage_price:.2f}，明日优先保护利润"
             elif hard_stop_price > 0 and latest <= hard_stop_price:
                 action = "SELL_NOW"
                 reason = f"跌破硬止损 {hard_stop_price:.2f}"
             elif target_price > 0 and latest >= target_price:
                 action = "TAKE_PROFIT"
                 reason = f"达到目标上沿 {target_price:.2f}"
+            elif first_manage_hit and vwap > 0 and latest < vwap and latest_time >= "09:45":
+                action = "REDUCE_PROFIT"
+                reason = f"已触及第一管理线 {first_manage_price:.2f}，但跌回VWAP {vwap:.2f} 下方，提示保护利润/减仓"
+            elif first_manage_hit and highest > buy_price and latest <= highest * (1 - trailing_stop_pct / 100):
+                action = "REDUCE_PROFIT"
+                reason = f"已触及第一管理线 {first_manage_price:.2f}，从持仓高点 {highest:.2f} 回撤超过 {trailing_stop_pct:.1f}%，提示保护利润/减仓"
+            elif first_manage_price > 0 and latest >= first_manage_price:
+                action = "MANAGE_PROFIT"
+                reason = f"达到第一管理线 {first_manage_price:.2f}，不强制卖出；建议上移止损、盯VWAP，允许手动减仓"
             elif highest > buy_price and latest <= highest * (1 - trailing_stop_pct / 100):
                 action = "TRAIL_SELL"
                 reason = f"从日内/持仓高点 {highest:.2f} 回落超过 {trailing_stop_pct:.1f}%"
@@ -504,6 +527,7 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                     latest_price=round(latest, 4),
                     vwap=round(vwap, 4),
                     target_price=round(target_price, 4),
+                    first_manage_price=round(first_manage_price, 4),
                     hard_stop_price=round(hard_stop_price, 4),
                     highest_price=round(highest, 4),
                     pnl_pct=round(pnl_pct, 2),
@@ -512,7 +536,7 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
             )
     if changed:
         write_positions(positions_path, positions)
-    return sorted(advices, key=lambda item: item.action not in {"SELL_NOW", "TAKE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"})
+    return sorted(advices, key=lambda item: item.action not in {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"})
 
 
 def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advices: list[BuyAdvice], sell_advices: list[SellAdvice], monitor_report: Path, monitor_csv: Path) -> tuple[Path, Path, Path]:
@@ -522,7 +546,7 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     csv_path = out_dir / f"trade_plan_{phase}_{stamp}.csv"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    urgent = [item for item in sell_advices if item.action in {"SELL_NOW", "TAKE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"}]
+    urgent = [item for item in sell_advices if item.action in {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"}]
     buys = [item for item in buy_advices if item.action == "BUY_NOW"]
     lines = [
         f"# 本地短线交易建议 - {today.isoformat()} {dt.datetime.now():%H:%M:%S}",
@@ -535,14 +559,14 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
         "",
         "## 先看卖出/持仓",
         "",
-        "| 动作 | 代码 | 名称 | 成本 | 最新 | VWAP | 盈亏 | 目标 | 止损 | 理由 |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| 动作 | 代码 | 名称 | 成本 | 最新 | VWAP | 盈亏 | 目标上沿 | 第一管理线 | 止损 | 理由 |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     if sell_advices:
         for item in sell_advices:
-            lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.buy_price:.2f} | {item.latest_price:.2f} | {item.vwap:.2f} | {item.pnl_pct:.2f}% | {item.target_price:.2f} | {item.hard_stop_price:.2f} | {item.reason} |")
+            lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.buy_price:.2f} | {item.latest_price:.2f} | {item.vwap:.2f} | {item.pnl_pct:.2f}% | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.hard_stop_price:.2f} | {item.reason} |")
     else:
-        lines.append("| - | - | 当前没有登记持仓 | - | - | - | - | - | - | - |")
+        lines.append("| - | - | 当前没有登记持仓 | - | - | - | - | - | - | - | - |")
     lines.extend(
         [
             "",
@@ -573,7 +597,7 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for item in sell_advices:
-            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": "", "hard_stop_price": item.hard_stop_price, "target_upper_hit_rate_pct": "", "first_manage_hit_rate_pct": "", "pnl_pct": item.pnl_pct, "reason": item.reason})
+            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "hard_stop_price": item.hard_stop_price, "target_upper_hit_rate_pct": "", "first_manage_hit_rate_pct": "", "pnl_pct": item.pnl_pct, "reason": item.reason})
         for item in buy_advices:
             writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "hard_stop_price": item.hard_stop_price, "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "pnl_pct": "", "reason": item.reason})
 
@@ -595,7 +619,7 @@ def payload_from_plan(json_path: Path) -> dict[str, object]:
 def beep_if_needed(args: argparse.Namespace, buy_advices: list[BuyAdvice], sell_advices: list[SellAdvice]) -> None:
     if not args.beep:
         return
-    urgent_sell = any(item.action in {"SELL_NOW", "TAKE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"} for item in sell_advices)
+    urgent_sell = any(item.action in {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"} for item in sell_advices)
     urgent_buy = any(item.action == "BUY_NOW" for item in buy_advices)
     if not urgent_sell and not urgent_buy:
         return

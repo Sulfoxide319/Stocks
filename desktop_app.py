@@ -80,7 +80,7 @@ DEFAULT_LIVE_WATCH_NEAR_THRESHOLD_PCT = 0.25
 DEFAULT_LIVE_WATCH_TRIGGER_ADJUST_PCT = 0.0
 LIVE_WATCH_MIN_NEAR_TICKS = 3
 ASHARE_TICK_SIZE = 0.01
-URGENT_SELL_ACTIONS = {"SELL_NOW", "TAKE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"}
+URGENT_SELL_ACTIONS = {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"}
 
 
 class NullTextWriter:
@@ -903,7 +903,7 @@ class MainWindow(QMainWindow):
                 self._fmt(item.get("latest_price")),
                 self._fmt(item.get("buy_price") if side == "卖出" else item.get("effective_trigger_price", item.get("trigger_price"))),
                 self._fmt(item.get("target_price")),
-                self._fmt(item.get("first_manage_price")) if side == "买入" else "",
+                self._fmt(item.get("first_manage_price")),
                 self._fmt(item.get("hard_stop_price")),
                 f"{self._fmt(item.get('first_manage_hit_rate_pct'))}%" if side == "买入" and item.get("first_manage_hit_rate_pct") not in {None, ""} else "",
                 self._fmt(item.get("pnl_pct")) if side == "卖出" else "",
