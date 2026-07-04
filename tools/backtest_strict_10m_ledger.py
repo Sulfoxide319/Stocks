@@ -875,16 +875,21 @@ def refine_trade_strict_10m(
     for bar in bars:
         if bar.moment <= entry_bar.moment:
             continue
-        if bar.high > best_high:
-            best_high = bar.high
         if bar.date < first_sell_date:
+            if bar.high > best_high:
+                best_high = bar.high
             continue
         current_vwap = vwap_by_moment.get(bar.moment, bar.close)
         previous_close = previous_close_before(daily_bars, bar.date) or entry_price
         limit_down_blocked = args.reject_limit_exit and is_limit_down(previous_close, bar.close, limit_threshold, args.price_tick)
+        if args.trailing_reference_policy == "same_bar_high" and bar.high > best_high:
+            best_high = bar.high
+        trailing_reference_high = best_high
         if bar.low <= entry_price * (1 - planned.hard_stop_pct):
             if limit_down_blocked:
                 limit_down_blocked_exits += 1
+                if args.trailing_reference_policy == "previous_high" and bar.high > best_high:
+                    best_high = bar.high
                 continue
             exit_bar = bar
             raw_stop_price = max(entry_price * (1 - planned.hard_stop_pct), daily_limit_price(previous_close, limit_threshold, -1, args))
@@ -899,11 +904,13 @@ def refine_trade_strict_10m(
             exit_price = sell_execution_price(entry_price * (1 + planned.target_pct), args)
             exit_reason = "take_profit_10m"
             break
-        if best_high >= entry_price * (1 + max(0.04, planned.target_pct * 0.4)):
-            trailing_price = best_high * (1 - planned.trailing_stop_pct)
+        if trailing_reference_high >= entry_price * (1 + max(0.04, planned.target_pct * 0.4)):
+            trailing_price = trailing_reference_high * (1 - planned.trailing_stop_pct)
             if bar.low <= trailing_price:
                 if limit_down_blocked:
                     limit_down_blocked_exits += 1
+                    if args.trailing_reference_policy == "previous_high" and bar.high > best_high:
+                        best_high = bar.high
                     continue
                 exit_bar = bar
                 exit_price = sell_execution_price(max(trailing_price, daily_limit_price(previous_close, limit_threshold, -1, args)), args)
@@ -916,11 +923,15 @@ def refine_trade_strict_10m(
         if args.vwap_fail_bars > 0 and below_vwap_count >= args.vwap_fail_bars:
             if limit_down_blocked:
                 limit_down_blocked_exits += 1
+                if args.trailing_reference_policy == "previous_high" and bar.high > best_high:
+                    best_high = bar.high
                 continue
             exit_bar = bar
             exit_price = sell_execution_price(max(bar.close, daily_limit_price(previous_close, limit_threshold, -1, args)), args)
             exit_reason = "vwap_fail_10m"
             break
+        if args.trailing_reference_policy == "previous_high" and bar.high > best_high:
+            best_high = bar.high
 
     features = dict(planned.features)
     features.update(
@@ -936,6 +947,7 @@ def refine_trade_strict_10m(
             "first_manage_price": round(first_manage_price, 4) if first_manage_price else "",
             "execution_interval_minutes": 10,
             "slippage_bps": args.slippage_bps,
+            "trailing_reference_policy": args.trailing_reference_policy,
             "limit_threshold_pct": round(limit_threshold * 100, 4),
             "limit_down_blocked_exits": limit_down_blocked_exits,
         }
@@ -1321,6 +1333,7 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "partial_sell_ratio_normal": args.partial_sell_ratio_normal,
         "partial_sell_ratio_cold": args.partial_sell_ratio_cold,
         "partial_sell_ratio_narrow_rally": args.partial_sell_ratio_narrow_rally,
+        "trailing_reference_policy": args.trailing_reference_policy,
         "cold_min_traded_value_ratio": args.cold_min_traded_value_ratio,
         "cold_min_momentum_10d_pct": args.cold_min_momentum_10d_pct,
         "cold_min_sector_momentum_5d_pct": args.cold_min_sector_momentum_5d_pct,
@@ -1361,6 +1374,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trail-atr-mult", type=float, default=0.25)
     parser.add_argument("--trail-min", type=float, default=0.025)
     parser.add_argument("--trail-max", type=float, default=0.06)
+    parser.add_argument(
+        "--trailing-reference-policy",
+        choices=["previous_high", "same_bar_high"],
+        default="previous_high",
+        help="Use previous bars' high for trailing-stop triggers; same_bar_high reproduces the older optimistic 10m OHLC assumption.",
+    )
     parser.add_argument("--partial-take-profit", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--first-manage-ratio", type=float, default=0.4)
     parser.add_argument("--first-manage-min", type=float, default=0.04)
