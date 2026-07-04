@@ -1356,7 +1356,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-min", type=float, default=0.05)
     parser.add_argument("--target-max", type=float, default=0.18)
     parser.add_argument("--stop-atr-mult", type=float, default=0.45)
-    parser.add_argument("--stop-min", type=float, default=0.02)
+    parser.add_argument("--stop-min", type=float, default=0.015)
     parser.add_argument("--stop-max", type=float, default=0.07)
     parser.add_argument("--trail-atr-mult", type=float, default=0.25)
     parser.add_argument("--trail-min", type=float, default=0.025)

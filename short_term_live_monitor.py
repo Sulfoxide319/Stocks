@@ -165,11 +165,23 @@ def resolve_event_scores(events_arg: str, today: dt.date, max_event_age_days: in
     return EventScoreContext(path, scores, status, age_days)
 
 
-def dynamic_exit_params(row: PatternRow, target_atr: float, target_range: float, stop_atr: float, trail_atr: float) -> tuple[float, float, float]:
+def dynamic_exit_params(
+    row: PatternRow,
+    target_atr: float,
+    target_range: float,
+    stop_atr: float,
+    trail_atr: float,
+    target_min: float = 0.05,
+    target_max: float = 0.18,
+    stop_min: float = 0.015,
+    stop_max: float = 0.07,
+    trail_min: float = 0.025,
+    trail_max: float = 0.06,
+) -> tuple[float, float, float]:
     event_bonus = 0.02 if row.setup_type == "EVENT_PLUS_VOLATILITY" else 0.0
-    target = min(0.18, max(0.05, row.atr_pct / 100 * target_atr + row.max_5d_range_pct / 100 * target_range + event_bonus))
-    stop = min(0.09, max(0.03, row.atr_pct / 100 * stop_atr))
-    trail = min(0.06, max(0.025, row.atr_pct / 100 * trail_atr))
+    target = min(target_max, max(target_min, row.atr_pct / 100 * target_atr + row.max_5d_range_pct / 100 * target_range + event_bonus))
+    stop = min(stop_max, max(stop_min, row.atr_pct / 100 * stop_atr))
+    trail = min(trail_max, max(trail_min, row.atr_pct / 100 * trail_atr))
     return target, stop, trail
 
 
@@ -613,7 +625,7 @@ def main() -> int:
                 filter_counts[strategy_reason] += 1
                 continue
             filter_counts["passed_daily_filters"] += 1
-            target, stop, trail = dynamic_exit_params(row, 0.9, 0.35, 0.7, 0.25)
+            target, stop, trail = dynamic_exit_params(row, 0.9, 0.35, 0.45, 0.25)
             action = "WATCH_NEXT_SESSION"
             latest_price = 0.0
             vwap = 0.0
