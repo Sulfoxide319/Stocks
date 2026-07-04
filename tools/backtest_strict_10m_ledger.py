@@ -265,6 +265,35 @@ def partial_sell_shares(remaining_shares: int, ratio: float, args: argparse.Name
     return max(0, lots * lot_size)
 
 
+def state_trail_atr_mult(state: str, args: argparse.Namespace) -> float:
+    if state == "normal" and float(args.normal_trail_atr_mult) > 0:
+        return float(args.normal_trail_atr_mult)
+    if state == "cold" and float(args.cold_trail_atr_mult) > 0:
+        return float(args.cold_trail_atr_mult)
+    if state == "narrow_rally" and float(args.narrow_rally_trail_atr_mult) > 0:
+        return float(args.narrow_rally_trail_atr_mult)
+    return float(args.trail_atr_mult)
+
+
+def apply_state_exit_overrides(planned: PlannedTrade, state: str, args: argparse.Namespace) -> PlannedTrade:
+    if not args.dynamic_exit:
+        return planned
+    trail_mult = state_trail_atr_mult(state, args)
+    if math.isclose(trail_mult, float(args.trail_atr_mult), rel_tol=0.0, abs_tol=1e-12):
+        return planned
+    atr_pct = float(planned.features.get("atr_pct") or 0.0)
+    trailing_stop_pct = min(float(args.trail_max), max(float(args.trail_min), atr_pct / 100 * trail_mult))
+    return replace(
+        planned,
+        trailing_stop_pct=trailing_stop_pct,
+        features={
+            **planned.features,
+            "dynamic_trail_atr_mult": trail_mult,
+            "dynamic_trailing_stop_pct": round(trailing_stop_pct * 100, 4),
+        },
+    )
+
+
 def passes_market_quality(planned: PlannedTrade, state: str, args: argparse.Namespace) -> bool:
     features = planned.features
     if state == "cold":
@@ -1456,6 +1485,8 @@ def append_ledger_row(
             "dynamic_max_5d_range_pct": features.get("dynamic_max_5d_range_pct", ""),
             "dynamic_max_momentum_10d_pct": features.get("dynamic_max_momentum_10d_pct", ""),
             "dynamic_max_close_position_20d_pct": features.get("dynamic_max_close_position_20d_pct", ""),
+            "dynamic_trail_atr_mult": features.get("dynamic_trail_atr_mult", ""),
+            "dynamic_trailing_stop_pct": features.get("dynamic_trailing_stop_pct", ""),
             "limit_down_blocked_exits": features.get("limit_down_blocked_exits", ""),
         }
     )
@@ -1508,6 +1539,7 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
             if not passes_market_quality(raw_planned, str(temperature["state"]), args):
                 skipped_candidates += 1
                 continue
+            raw_planned = apply_state_exit_overrides(raw_planned, str(temperature["state"]), args)
             planned = refine_trade_strict_10m(raw_planned, price_map.get(raw_planned.ticker, []), intraday_map.get(raw_planned.ticker, []), end_date, args)
             if not planned:
                 skipped_candidates += 1
@@ -1692,6 +1724,9 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "partial_sell_ratio_cold": args.partial_sell_ratio_cold,
         "partial_sell_ratio_narrow_rally": args.partial_sell_ratio_narrow_rally,
         "trailing_reference_policy": args.trailing_reference_policy,
+        "normal_trail_atr_mult": args.normal_trail_atr_mult,
+        "cold_trail_atr_mult": args.cold_trail_atr_mult,
+        "narrow_rally_trail_atr_mult": args.narrow_rally_trail_atr_mult,
         "vwap_fail_bars": args.vwap_fail_bars,
         "vwap_fail_after_first_manage_bars": args.vwap_fail_after_first_manage_bars,
         "cold_min_traded_value_ratio": args.cold_min_traded_value_ratio,
@@ -1735,6 +1770,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trail-atr-mult", type=float, default=0.25)
     parser.add_argument("--trail-min", type=float, default=0.025)
     parser.add_argument("--trail-max", type=float, default=0.06)
+    parser.add_argument("--normal-trail-atr-mult", type=float, default=0.34)
+    parser.add_argument("--cold-trail-atr-mult", type=float, default=0.0)
+    parser.add_argument("--narrow-rally-trail-atr-mult", type=float, default=0.0)
     parser.add_argument(
         "--trailing-reference-policy",
         choices=["previous_high", "same_bar_high"],

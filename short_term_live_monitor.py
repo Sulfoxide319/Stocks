@@ -442,6 +442,16 @@ def active_entry_end_time(args: argparse.Namespace, market_state: str) -> dt.tim
     return parse_clock_arg(args.entry_end_time, "--entry-end-time")
 
 
+def state_trail_atr_mult(args: argparse.Namespace, market_state: str) -> float:
+    if market_state == "normal" and float(args.normal_trail_atr_mult) > 0:
+        return float(args.normal_trail_atr_mult)
+    if market_state == "cold" and float(args.cold_trail_atr_mult) > 0:
+        return float(args.cold_trail_atr_mult)
+    if market_state == "narrow_rally" and float(args.narrow_rally_trail_atr_mult) > 0:
+        return float(args.narrow_rally_trail_atr_mult)
+    return float(args.trail_atr_mult)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Monitor high expected-upside A-share short-term candidates.")
     parser.add_argument("--watchlist", default="config/watchlist.mainboard_liquid.csv")
@@ -467,6 +477,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-buffer", type=float, default=0.0)
     parser.add_argument("--vwap-buffer", type=float, default=0.003)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
+    parser.add_argument("--trail-atr-mult", type=float, default=0.25)
+    parser.add_argument("--normal-trail-atr-mult", type=float, default=0.34)
+    parser.add_argument("--cold-trail-atr-mult", type=float, default=0.0)
+    parser.add_argument("--narrow-rally-trail-atr-mult", type=float, default=0.0)
     parser.add_argument("--max-5d-range-pct", type=float, default=0.0)
     parser.add_argument("--max-momentum-10d-pct", type=float, default=999.0)
     parser.add_argument("--max-close-position-20d-pct", type=float, default=100.0)
@@ -696,7 +710,8 @@ def main() -> int:
                 filter_counts[strategy_reason] += 1
                 continue
             filter_counts["passed_daily_filters"] += 1
-            target, stop, trail = dynamic_exit_params(row, 0.9, 0.35, 0.45, 0.25)
+            trail_atr_mult = state_trail_atr_mult(args, str(temperature["state"]))
+            target, stop, trail = dynamic_exit_params(row, 0.9, 0.35, 0.45, trail_atr_mult)
             action = "WATCH_NEXT_SESSION"
             latest_price = 0.0
             vwap = 0.0

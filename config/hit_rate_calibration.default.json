@@ -1,17 +1,168 @@
 {
   "source_prefix": "strict_10m_no_events_1M_12M_to_20260703",
-  "generated_at": "2026-07-04T21:24:41",
+  "generated_at": "2026-07-04T21:50:00",
   "default_period": "12M",
   "periods": {
+    "1M": {
+      "overall": {
+        "sample_size": 14,
+        "target_upper_touch_rate_pct": 7.1429,
+        "target_upper_sellable_hit_rate_pct": 7.1429,
+        "first_manage_touch_rate_pct": 57.1429,
+        "first_manage_sellable_hit_rate_pct": 50.0,
+        "win_rate_pct": 57.1429,
+        "avg_return_pct": 3.1053
+      },
+      "market_state": {
+        "cold": {
+          "sample_size": 10,
+          "target_upper_touch_rate_pct": 0.0,
+          "target_upper_sellable_hit_rate_pct": 0.0,
+          "first_manage_touch_rate_pct": 50.0,
+          "first_manage_sellable_hit_rate_pct": 40.0,
+          "win_rate_pct": 50.0,
+          "avg_return_pct": 1.4922
+        },
+        "narrow_rally": {
+          "sample_size": 4,
+          "target_upper_touch_rate_pct": 25.0,
+          "target_upper_sellable_hit_rate_pct": 25.0,
+          "first_manage_touch_rate_pct": 75.0,
+          "first_manage_sellable_hit_rate_pct": 75.0,
+          "win_rate_pct": 75.0,
+          "avg_return_pct": 7.138
+        }
+      }
+    },
+    "3M": {
+      "overall": {
+        "sample_size": 29,
+        "target_upper_touch_rate_pct": 6.8966,
+        "target_upper_sellable_hit_rate_pct": 6.8966,
+        "first_manage_touch_rate_pct": 68.9655,
+        "first_manage_sellable_hit_rate_pct": 62.069,
+        "win_rate_pct": 68.9655,
+        "avg_return_pct": 3.8042
+      },
+      "market_state": {
+        "cold": {
+          "sample_size": 16,
+          "target_upper_touch_rate_pct": 6.25,
+          "target_upper_sellable_hit_rate_pct": 6.25,
+          "first_manage_touch_rate_pct": 50.0,
+          "first_manage_sellable_hit_rate_pct": 43.75,
+          "win_rate_pct": 50.0,
+          "avg_return_pct": 2.0348
+        },
+        "narrow_rally": {
+          "sample_size": 4,
+          "target_upper_touch_rate_pct": 25.0,
+          "target_upper_sellable_hit_rate_pct": 25.0,
+          "first_manage_touch_rate_pct": 75.0,
+          "first_manage_sellable_hit_rate_pct": 75.0,
+          "win_rate_pct": 75.0,
+          "avg_return_pct": 7.138
+        },
+        "normal": {
+          "sample_size": 9,
+          "target_upper_touch_rate_pct": 0.0,
+          "target_upper_sellable_hit_rate_pct": 0.0,
+          "first_manage_touch_rate_pct": 100.0,
+          "first_manage_sellable_hit_rate_pct": 88.8889,
+          "win_rate_pct": 100.0,
+          "avg_return_pct": 5.4682
+        }
+      }
+    },
+    "6M": {
+      "overall": {
+        "sample_size": 49,
+        "target_upper_touch_rate_pct": 12.2449,
+        "target_upper_sellable_hit_rate_pct": 12.2449,
+        "first_manage_touch_rate_pct": 59.1837,
+        "first_manage_sellable_hit_rate_pct": 53.0612,
+        "win_rate_pct": 57.1429,
+        "avg_return_pct": 3.2352
+      },
+      "market_state": {
+        "cold": {
+          "sample_size": 22,
+          "target_upper_touch_rate_pct": 9.0909,
+          "target_upper_sellable_hit_rate_pct": 9.0909,
+          "first_manage_touch_rate_pct": 45.4545,
+          "first_manage_sellable_hit_rate_pct": 36.3636,
+          "win_rate_pct": 40.9091,
+          "avg_return_pct": 1.5132
+        },
+        "narrow_rally": {
+          "sample_size": 4,
+          "target_upper_touch_rate_pct": 25.0,
+          "target_upper_sellable_hit_rate_pct": 25.0,
+          "first_manage_touch_rate_pct": 75.0,
+          "first_manage_sellable_hit_rate_pct": 75.0,
+          "win_rate_pct": 75.0,
+          "avg_return_pct": 7.138
+        },
+        "normal": {
+          "sample_size": 23,
+          "target_upper_touch_rate_pct": 13.0435,
+          "target_upper_sellable_hit_rate_pct": 13.0435,
+          "first_manage_touch_rate_pct": 69.5652,
+          "first_manage_sellable_hit_rate_pct": 65.2174,
+          "win_rate_pct": 69.5652,
+          "avg_return_pct": 4.2036
+        }
+      }
+    },
+    "9M": {
+      "overall": {
+        "sample_size": 68,
+        "target_upper_touch_rate_pct": 10.2941,
+        "target_upper_sellable_hit_rate_pct": 10.2941,
+        "first_manage_touch_rate_pct": 50.0,
+        "first_manage_sellable_hit_rate_pct": 44.1176,
+        "win_rate_pct": 51.4706,
+        "avg_return_pct": 2.5339
+      },
+      "market_state": {
+        "cold": {
+          "sample_size": 23,
+          "target_upper_touch_rate_pct": 8.6957,
+          "target_upper_sellable_hit_rate_pct": 8.6957,
+          "first_manage_touch_rate_pct": 43.4783,
+          "first_manage_sellable_hit_rate_pct": 34.7826,
+          "win_rate_pct": 39.1304,
+          "avg_return_pct": 1.3207
+        },
+        "narrow_rally": {
+          "sample_size": 7,
+          "target_upper_touch_rate_pct": 14.2857,
+          "target_upper_sellable_hit_rate_pct": 14.2857,
+          "first_manage_touch_rate_pct": 57.1429,
+          "first_manage_sellable_hit_rate_pct": 57.1429,
+          "win_rate_pct": 71.4286,
+          "avg_return_pct": 4.3498
+        },
+        "normal": {
+          "sample_size": 38,
+          "target_upper_touch_rate_pct": 10.5263,
+          "target_upper_sellable_hit_rate_pct": 10.5263,
+          "first_manage_touch_rate_pct": 52.6316,
+          "first_manage_sellable_hit_rate_pct": 47.3684,
+          "win_rate_pct": 55.2632,
+          "avg_return_pct": 2.9337
+        }
+      }
+    },
     "12M": {
       "overall": {
         "sample_size": 82,
-        "target_upper_touch_rate_pct": 8.5366,
-        "target_upper_sellable_hit_rate_pct": 8.5366,
+        "target_upper_touch_rate_pct": 9.7561,
+        "target_upper_sellable_hit_rate_pct": 9.7561,
         "first_manage_touch_rate_pct": 47.561,
         "first_manage_sellable_hit_rate_pct": 39.0244,
         "win_rate_pct": 47.561,
-        "avg_return_pct": 2.0421
+        "avg_return_pct": 2.0863
       },
       "market_state": {
         "cold": {
@@ -34,12 +185,12 @@
         },
         "normal": {
           "sample_size": 50,
-          "target_upper_touch_rate_pct": 8.0,
-          "target_upper_sellable_hit_rate_pct": 8.0,
+          "target_upper_touch_rate_pct": 10.0,
+          "target_upper_sellable_hit_rate_pct": 10.0,
           "first_manage_touch_rate_pct": 50.0,
           "first_manage_sellable_hit_rate_pct": 40.0,
           "win_rate_pct": 50.0,
-          "avg_return_pct": 2.2229
+          "avg_return_pct": 2.2954
         }
       }
     }

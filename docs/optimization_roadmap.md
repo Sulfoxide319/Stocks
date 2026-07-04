@@ -26,17 +26,17 @@ A candidate may become default only if:
 | 6 | Add condition diagnostics for market state, entry timing, volatility, momentum, sector, and exit reason. | Done | v0.4.28 |
 | 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak momentum and low-ATR noise; continue monitoring | v0.4.28, v0.4.32, v0.4.33 |
 | 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; managed-position VWAP weakness now uses a two-confirmation path in backtest and live alerts | v0.4.29, v0.4.36, v0.4.37 |
-| 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Improved for first-management VWAP pullbacks; continue sensitivity checks | v0.4.30, v0.4.31, v0.4.37 |
-| 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; v0.4.37 beat v0.4.36 proxy on 9/9 rolling return and drawdown checks | v0.4.34, v0.4.37 |
+| 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Improved for first-management VWAP pullbacks and normal-market trailing winners; continue sensitivity checks | v0.4.30, v0.4.31, v0.4.37, v0.4.38 |
+| 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; v0.4.38 beat v0.4.37 proxy on 9/9 rolling returns, with one 6M rolling DD micro-increase documented as a return/DD tradeoff | v0.4.34, v0.4.37, v0.4.38 |
 
 ## Current Baseline
 
-Baseline: `v0.4.37`.
+Baseline: `v0.4.38`.
 
 | Period | Return | Max DD | Trades | Profit Factor |
 |---|---:|---:|---:|---:|
 | 1M | 13.7512% | 3.5834% | 14 | 4.9490 |
 | 3M | 41.5900% | 3.7516% | 29 | 6.9755 |
 | 6M | 64.9549% | 3.9371% | 49 | 4.8789 |
-| 9M | 69.4801% | 5.2000% | 68 | 3.8083 |
-| 12M | 68.4631% | 7.2032% | 82 | 3.0923 |
+| 9M | 70.9137% | 5.2000% | 68 | 3.8191 |
+| 12M | 70.4732% | 7.2032% | 82 | 3.1338 |
