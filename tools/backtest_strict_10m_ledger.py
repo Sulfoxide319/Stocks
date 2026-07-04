@@ -59,6 +59,13 @@ def parse_clock(raw: str) -> dt.time:
     return dt.time(int(hour), int(minute))
 
 
+def parse_optional_clock(raw: str) -> dt.time | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    return parse_clock(text)
+
+
 def first_index_after(bars: list[PriceBar], date_value: dt.date) -> int | None:
     for index, bar in enumerate(bars):
         if bar.date > date_value:
@@ -515,6 +522,11 @@ def append_ledger_row(
     note: str,
     realized_pnl: float = 0.0,
 ) -> None:
+    features = planned.features
+    entry_vwap = float(features.get("entry_vwap") or 0.0)
+    entry_vwap_distance_pct = (
+        (planned.entry_price / entry_vwap - 1) * 100 if planned.entry_price > 0 and entry_vwap > 0 else 0.0
+    )
     rows.append(
         {
             "period": period,
@@ -533,6 +545,30 @@ def append_ledger_row(
             "return_pct": round(planned.return_pct, 4) if action == "SELL" else "",
             "reason": planned.exit_reason if action == "SELL" else planned.setup_type,
             "note": note,
+            "market_state": features.get("market_state", ""),
+            "score": round(planned.score, 4),
+            "setup_type": planned.setup_type,
+            "entry_time": features.get("entry_time", ""),
+            "exit_time": features.get("exit_time", ""),
+            "entry_gap_pct": features.get("entry_gap_pct", ""),
+            "entry_vwap": features.get("entry_vwap", ""),
+            "entry_vwap_distance_pct": round(entry_vwap_distance_pct, 4),
+            "traded_value_ratio": features.get("traded_value_ratio", ""),
+            "atr_pct": features.get("atr_pct", ""),
+            "max_5d_range_pct": features.get("max_5d_range_pct", ""),
+            "momentum_3d_pct": features.get("momentum_3d_pct", ""),
+            "momentum_10d_pct": features.get("momentum_10d_pct", ""),
+            "value_ratio_3d": features.get("value_ratio_3d", ""),
+            "distance_to_ma5_pct": features.get("distance_to_ma5_pct", ""),
+            "close_position_20d_pct": features.get("close_position_20d_pct", ""),
+            "sector_group": features.get("sector_group", ""),
+            "sector_momentum_5d_pct": features.get("sector_momentum_5d_pct", ""),
+            "sector_above_ma20_ratio": features.get("sector_above_ma20_ratio", ""),
+            "dynamic_min_score": features.get("dynamic_min_score", ""),
+            "dynamic_max_5d_range_pct": features.get("dynamic_max_5d_range_pct", ""),
+            "dynamic_max_momentum_10d_pct": features.get("dynamic_max_momentum_10d_pct", ""),
+            "dynamic_max_close_position_20d_pct": features.get("dynamic_max_close_position_20d_pct", ""),
+            "limit_down_blocked_exits": features.get("limit_down_blocked_exits", ""),
         }
     )
 
@@ -585,6 +621,32 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
             if not planned:
                 skipped_candidates += 1
                 continue
+            entry_time = parse_clock(str(planned.features.get("entry_time") or "09:50"))
+            normal_entry_end = parse_optional_clock(args.normal_entry_end_time)
+            if str(temperature["state"]) == "normal" and normal_entry_end is not None and entry_time > normal_entry_end:
+                skipped_candidates += 1
+                continue
+            cold_first_end = parse_optional_clock(args.cold_first_entry_end_time)
+            if (
+                str(temperature["state"]) == "cold"
+                and args.cold_first_entry_min_score > 0
+                and cold_first_end is not None
+                and entry_time <= cold_first_end
+                and planned.score < args.cold_first_entry_min_score
+            ):
+                skipped_candidates += 1
+                continue
+            planned = replace(
+                planned,
+                features={
+                    **planned.features,
+                    "market_state": temperature["state"],
+                    "dynamic_min_score": overrides.get("min_score", args.min_score),
+                    "dynamic_max_5d_range_pct": overrides.get("max_5d_range_pct", getattr(args, "max_5d_range_pct", 0.0)),
+                    "dynamic_max_momentum_10d_pct": overrides.get("max_momentum_10d_pct", getattr(args, "max_momentum_10d_pct", 999.0)),
+                    "dynamic_max_close_position_20d_pct": overrides.get("max_close_position_20d_pct", getattr(args, "max_close_position_20d_pct", 100.0)),
+                },
+            )
             slots = max(1, args.max_positions - len(open_positions))
             capital = cash / slots
             if regime.action == "reduce":
@@ -732,6 +794,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-sector-above-ma20-ratio", type=float, default=0.35)
     parser.add_argument("--entry-start-time", default="09:50")
     parser.add_argument("--entry-end-time", default="11:20")
+    parser.add_argument("--normal-entry-end-time", default="10:40", help="optional stricter latest entry time for normal markets")
+    parser.add_argument("--cold-first-entry-min-score", type=float, default=0.0, help="optional min score for cold-market first-window entries")
+    parser.add_argument("--cold-first-entry-end-time", default="09:50")
     parser.add_argument("--max-gap-up", type=float, default=0.02)
     parser.add_argument("--max-gap-down", type=float, default=0.03)
     parser.add_argument("--gap-volume-threshold", type=float, default=0.0)
@@ -744,7 +809,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamic-params", action="store_true", default=True)
     parser.add_argument("--hot-capital-factor", type=float, default=0.0)
     parser.add_argument("--normal-capital-factor", type=float, default=1.0)
-    parser.add_argument("--cold-capital-factor", type=float, default=0.75)
+    parser.add_argument("--cold-capital-factor", type=float, default=0.9)
     parser.add_argument("--hot-min-score", type=float, default=90.0)
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
     parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.3)

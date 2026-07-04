@@ -45,6 +45,8 @@ MONITOR_DEFAULT_ARGS = [
     "1.3",
     "--entry-end-time",
     "11:20",
+    "--normal-entry-end-time",
+    "10:40",
     "--vwap-buffer",
     "0.003",
     "--max-5d-range-pct",

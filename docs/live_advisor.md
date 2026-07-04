@@ -50,11 +50,13 @@ python live_advisor_daemon.py --once --github-mode issue --github-issue-title "A
 - Default buyable universe: liquid mainboard-style symbols with prefixes
   `000`, `001`, `002`, `003`, `600`, `601`, `603`, `605`.
 - Hot market: skip new entries.
-- Normal market: trade with current main filters.
+- Normal market: trade with current main filters, but stop new entries after
+  `10:40`.
 - Narrow-rally market: expand the observation pool when breadth is weak but
   short-term returns are positive; strict buy execution remains high-score only.
 - Cold market: allow entries with reduced risk sizing in strict backtests.
-- Entry window: `09:45` to `11:20`.
+- Entry window: `09:45` to `11:20`; normal-market buy confirmation ends at
+  `10:40`.
 - Buy confirmation requires both the trigger and buffered VWAP.
 - Positive open gap requires signal-day value ratio `>= 1.30`.
 - Main filters: 5-day range `<= 32`, 10-day momentum `<= 26`, 20-day position `<= 85`.

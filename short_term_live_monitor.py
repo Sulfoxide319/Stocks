@@ -345,6 +345,20 @@ def monitor_progress(message: str) -> None:
     print(f"MONITOR_PROGRESS|{message}", flush=True)
 
 
+def parse_clock_arg(value: str, name: str) -> dt.time:
+    try:
+        hour, minute = (int(part) for part in value.split(":", 1))
+        return dt.time(hour, minute)
+    except Exception as exc:
+        raise SystemExit(f"{name} must be HH:MM") from exc
+
+
+def active_entry_end_time(args: argparse.Namespace, market_state: str) -> dt.time:
+    if market_state == "normal" and str(args.normal_entry_end_time).strip():
+        return parse_clock_arg(args.normal_entry_end_time, "--normal-entry-end-time")
+    return parse_clock_arg(args.entry_end_time, "--entry-end-time")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Monitor high expected-upside A-share short-term candidates.")
     parser.add_argument("--watchlist", default="config/watchlist.mainboard_liquid.csv")
@@ -360,7 +374,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--min-traded-value", type=float, default=200_000_000)
     parser.add_argument("--ma5-extension-limit", type=float, default=0.04)
-    parser.add_argument("--entry-end-time", default="11:15")
+    parser.add_argument("--entry-end-time", default="11:20")
+    parser.add_argument("--normal-entry-end-time", default="10:40")
     parser.add_argument("--max-gap-up", type=float, default=0.03)
     parser.add_argument("--max-gap-down", type=float, default=0.03)
     parser.add_argument("--gap-volume-threshold", type=float, default=0.0)
@@ -538,8 +553,7 @@ def main() -> int:
         "hot_market_skipped": 0,
         "passed_daily_filters": 0,
     }
-    entry_hour, entry_minute = (int(part) for part in args.entry_end_time.split(":", 1))
-    entry_end = dt.time(entry_hour, entry_minute)
+    entry_end = active_entry_end_time(args, str(temperature["state"]))
     monitor_progress("筛选候选股并检查盘中数据")
     with BaoStock5mClient() as client:
         for index, symbol in enumerate(symbols, start=1):
@@ -687,7 +701,7 @@ def main() -> int:
         f"- Event score source: `{event_context.path or '-'}` status=`{event_context.status}` age_days=`{event_context.age_days if event_context.age_days is not None else '-'}`",
         f"- Intraday data status: `{intraday_status}`",
         f"- Quote fallback: `{args.quote_fallback}`",
-        f"- Entry window end: `{args.entry_end_time}`",
+        f"- Entry window end: `{entry_end.isoformat(timespec='minutes')}`",
         f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
         "",
         "## Filter Funnel",
