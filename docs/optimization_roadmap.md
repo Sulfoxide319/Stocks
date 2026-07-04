@@ -24,9 +24,9 @@ A candidate may become default only if:
 | 4 | Expose practical sell signal points: target upper, first management, trailing stop, hard stop, VWAP/cost weakness, pre-close weakness. | Done; strict backtest now exports sell-path audit | v0.4.26, v0.4.36 |
 | 5 | Persist holding management state so repeated scans do not spam first-touch prompts. | Done | v0.4.27 |
 | 6 | Add condition diagnostics for market state, entry timing, volatility, momentum, sector, and exit reason. | Done | v0.4.28 |
-| 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak momentum and low-ATR noise; continue monitoring | v0.4.28, v0.4.32, v0.4.33 |
+| 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak momentum and low-ATR noise; v0.4.38 follow-up rejected simple cold/sector filters as over-filtering | v0.4.28, v0.4.32, v0.4.33, docs/optimization_experiment_log.md |
 | 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; managed-position VWAP weakness now uses a two-confirmation path in backtest and live alerts | v0.4.29, v0.4.36, v0.4.37 |
-| 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Improved for first-management VWAP pullbacks and normal-market trailing winners; continue sensitivity checks | v0.4.30, v0.4.31, v0.4.37, v0.4.38 |
+| 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Improved for first-management VWAP pullbacks and normal-market trailing winners; v0.4.38 follow-up rejected global VWAP delay/buffer changes | v0.4.30, v0.4.31, v0.4.37, v0.4.38, docs/optimization_experiment_log.md |
 | 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; v0.4.38 beat v0.4.37 proxy on 9/9 rolling returns, with one 6M rolling DD micro-increase documented as a return/DD tradeoff | v0.4.34, v0.4.37, v0.4.38 |
 
 ## Current Baseline
