@@ -190,6 +190,81 @@ def fetch_yahoo_history(
     return bars
 
 
+def ticker_to_baostock_code(ticker: str) -> str:
+    raw = ticker.strip().lower().replace(".ss", "").replace(".sz", "")
+    if raw.startswith(("sh.", "sz.")):
+        return raw
+    if raw.startswith(("sh", "sz")) and len(raw) >= 8:
+        return f"{raw[:2]}.{raw[2:8]}"
+    if raw.startswith(("6", "9")):
+        return f"sh.{raw[:6]}"
+    return f"sz.{raw[:6]}"
+
+
+class BaoStockDailyClient:
+    def __init__(self) -> None:
+        self._bs = None
+        self._logged_in = False
+
+    def __enter__(self) -> "BaoStockDailyClient":
+        self.login()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.logout()
+
+    def login(self) -> None:
+        if self._logged_in:
+            return
+        ensure_project_dependencies()
+        import baostock as bs  # type: ignore
+
+        result = bs.login()
+        if result.error_code != "0":
+            raise RuntimeError(f"BaoStock login failed: {result.error_code} {result.error_msg}")
+        self._bs = bs
+        self._logged_in = True
+
+    def logout(self) -> None:
+        if self._logged_in and self._bs is not None:
+            self._bs.logout()
+        self._logged_in = False
+
+    def fetch_history(self, ticker: str, start_date: dt.date, end_date: dt.date) -> list[PriceBar]:
+        self.login()
+        code = ticker_to_baostock_code(ticker)
+        fields = "date,open,high,low,close,volume"
+        result = self._bs.query_history_k_data_plus(  # type: ignore[union-attr]
+            code,
+            fields,
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            frequency="d",
+            adjustflag="3",
+        )
+        if result.error_code != "0":
+            raise RuntimeError(f"BaoStock daily query failed for {code}: {result.error_code} {result.error_msg}")
+        bars: list[PriceBar] = []
+        while result.next():
+            row = dict(zip(result.fields, result.get_row_data()))
+            try:
+                if not row.get("open"):
+                    continue
+                bars.append(
+                    PriceBar(
+                        date=dt.date.fromisoformat(row["date"]),
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=int(float(row.get("volume") or 0)),
+                    )
+                )
+            except (KeyError, ValueError):
+                continue
+        return bars
+
+
 def price_signal_as_of(bars: list[PriceBar], signal_date: dt.date) -> PriceSignal | None:
     index = last_bar_index_on_or_before(bars, signal_date)
     if index is None:

@@ -31,7 +31,7 @@ from short_term_pattern_miner import (
     setup_type,
 )
 from short_term_strategy_backtest import infer_sector_group, passes_strategy
-from tech_event_backtest import PriceBar, fetch_yahoo_history
+from tech_event_backtest import BaoStockDailyClient, PriceBar, fetch_yahoo_history
 from tech_event_radar import DEFAULT_HEADERS, load_watchlist, parse_date
 from intraday_vwap_backtest import dynamic_param_overrides, market_temperature
 
@@ -386,26 +386,73 @@ def main() -> int:
     fetch_start = today - dt.timedelta(days=args.lookback_days)
     price_map: dict[str, list[PriceBar]] = {}
     total_symbols = len(symbols)
-    for index, symbol in enumerate(symbols, start=1):
-        label = f"{symbol.ticker} {symbol.name}".strip()
-        monitor_progress(f"历史行情 {index}/{total_symbols}：{label}")
-        started = time.monotonic()
-        try:
-            bars = fetch_yahoo_history(
-                session,
-                symbol.yahoo_symbol or symbol.ticker,
-                fetch_start,
-                today,
-                timeout_seconds=args.history_timeout,
-            )
+    yahoo_disabled = False
+    yahoo_forbidden_streak = 0
+    baostock_daily_client: BaoStockDailyClient | None = None
+    def fetch_baostock_daily_for_symbol(ticker: str) -> list[PriceBar]:
+        nonlocal baostock_daily_client
+        if baostock_daily_client is None:
+            baostock_daily_client = BaoStockDailyClient()
+            baostock_daily_client.login()
+        return baostock_daily_client.fetch_history(ticker, fetch_start, today)
+
+    try:
+        for index, symbol in enumerate(symbols, start=1):
+            label = f"{symbol.ticker} {symbol.name}".strip()
+            monitor_progress(f"历史行情 {index}/{total_symbols}：{label}")
+            started = time.monotonic()
+            source = "Yahoo"
+            try:
+                if yahoo_disabled:
+                    raise RuntimeError("Yahoo disabled after repeated 403 responses")
+                bars = fetch_yahoo_history(
+                    session,
+                    symbol.yahoo_symbol or symbol.ticker,
+                    fetch_start,
+                    today,
+                    timeout_seconds=args.history_timeout,
+                )
+                yahoo_forbidden_streak = 0
+            except requests.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else 0
+                if status_code == 403:
+                    yahoo_forbidden_streak += 1
+                    if yahoo_forbidden_streak >= 3 and not yahoo_disabled:
+                        yahoo_disabled = True
+                        monitor_progress("Yahoo 日线连续 403，切换到 BaoStock 日线兜底")
+                source = "BaoStock"
+                try:
+                    bars = fetch_baostock_daily_for_symbol(symbol.ticker)
+                except Exception as fallback_exc:
+                    price_map[symbol.ticker] = []
+                    monitor_progress(f"历史行情失败：{label} - Yahoo HTTP {status_code}; BaoStock {type(fallback_exc).__name__}: {fallback_exc}")
+                    time.sleep(0.02)
+                    continue
+            except Exception as exc:
+                if yahoo_disabled:
+                    source = "BaoStock"
+                    try:
+                        bars = fetch_baostock_daily_for_symbol(symbol.ticker)
+                    except Exception as fallback_exc:
+                        price_map[symbol.ticker] = []
+                        monitor_progress(f"历史行情失败：{label} - BaoStock {type(fallback_exc).__name__}: {fallback_exc}")
+                        time.sleep(0.02)
+                        continue
+                else:
+                    price_map[symbol.ticker] = []
+                    monitor_progress(f"历史行情失败：{label} - {type(exc).__name__}: {exc}")
+                    time.sleep(0.02)
+                    continue
             price_map[symbol.ticker] = [bar for bar in bars if bar.date <= today]
             elapsed = time.monotonic() - started
+            if source != "Yahoo":
+                monitor_progress(f"历史行情兜底：{label} 使用 {source}，{len(price_map[symbol.ticker])} 条")
             if elapsed >= 2:
                 monitor_progress(f"历史行情偏慢：{label} 用时 {elapsed:.1f} 秒")
-        except Exception as exc:
-            price_map[symbol.ticker] = []
-            monitor_progress(f"历史行情失败：{label} - {type(exc).__name__}: {exc}")
-        time.sleep(0.02)
+            time.sleep(0.02)
+    finally:
+        if baostock_daily_client is not None:
+            baostock_daily_client.logout()
 
     monitor_progress("计算板块和市场温度")
     sector_by_ticker = {symbol.ticker: infer_sector_group(getattr(symbol, "notes", ""), getattr(symbol, "name", "")) for symbol in symbols}
