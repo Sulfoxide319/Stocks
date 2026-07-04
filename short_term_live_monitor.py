@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import json
 import math
 import re
 import time
@@ -57,7 +58,10 @@ class MonitorCandidate:
     first_manage_pct: float
     first_manage_price: float
     target_upper_hit_rate_pct: float
+    target_upper_touch_rate_pct: float
     first_manage_hit_rate_pct: float
+    hit_rate_sample_size: int
+    hit_rate_source: str
     market_state: str
     event_score: int
     ma5_distance_pct: float
@@ -76,6 +80,15 @@ class EventScoreContext:
     status: str
     age_days: int | None
     warning: str = ""
+
+
+@dataclass(frozen=True)
+class HitRateStats:
+    target_upper_hit_rate_pct: float
+    first_manage_hit_rate_pct: float
+    target_upper_touch_rate_pct: float = 0.0
+    sample_size: int = 0
+    source: str = "fallback"
 
 
 @dataclass(frozen=True)
@@ -189,10 +202,50 @@ def first_manage_pct_from_target(target_pct: float) -> float:
     return max(0.04, target_pct * 0.4)
 
 
-def historical_hit_rates(market_state: str) -> tuple[float, float]:
+def fallback_hit_rates(market_state: str) -> HitRateStats:
     if market_state == "narrow_rally":
-        return 0.0, 50.0
-    return 3.54, 35.4
+        return HitRateStats(target_upper_hit_rate_pct=0.0, first_manage_hit_rate_pct=50.0)
+    return HitRateStats(target_upper_hit_rate_pct=3.54, first_manage_hit_rate_pct=35.4)
+
+
+def load_hit_rate_calibration(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def historical_hit_rates(market_state: str, calibration: dict[str, Any] | None = None) -> HitRateStats:
+    fallback = fallback_hit_rates(market_state)
+    if not calibration:
+        return fallback
+    periods = calibration.get("periods")
+    if not isinstance(periods, dict):
+        return fallback
+    period_key = str(calibration.get("default_period") or "12M")
+    period_data = periods.get(period_key) or periods.get("12M")
+    if not isinstance(period_data, dict):
+        return fallback
+    market_state_rows = period_data.get("market_state")
+    selected: dict[str, Any] | None = None
+    source = "calibration_12M_overall"
+    if isinstance(market_state_rows, dict) and isinstance(market_state_rows.get(market_state), dict):
+        selected = market_state_rows.get(market_state)
+        source = f"calibration_12M_{market_state}"
+    elif isinstance(period_data.get("overall"), dict):
+        selected = period_data.get("overall")
+    if not selected:
+        return fallback
+    return HitRateStats(
+        target_upper_hit_rate_pct=float(selected.get("target_upper_sellable_hit_rate_pct") or 0.0),
+        first_manage_hit_rate_pct=float(selected.get("first_manage_sellable_hit_rate_pct") or 0.0),
+        target_upper_touch_rate_pct=float(selected.get("target_upper_touch_rate_pct") or 0.0),
+        sample_size=int(selected.get("sample_size") or 0),
+        source=source,
+    )
 
 
 def signal_row_for_latest(
@@ -395,6 +448,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allowed-prefixes", default=",".join(DEFAULT_BUYABLE_PREFIXES))
     parser.add_argument("--events", default="", help="event score JSON; defaults to today's tech_event_radar_YYYYMMDD.json, then latest dated file")
     parser.add_argument("--max-event-age-days", type=int, default=1, help="disable event scores when the dated event file is older than this many days")
+    parser.add_argument("--hit-rate-calibration", default="config/hit_rate_calibration.default.json", help="strict backtest hit-rate calibration JSON")
     parser.add_argument("--quote-fallback", choices=["sina", "none"], default="sina", help="quote-only fallback when BaoStock 5m bars are unavailable")
     parser.add_argument("--today", default="")
     parser.add_argument("--lookback-days", type=int, default=160)
@@ -474,6 +528,8 @@ def main() -> int:
                 status="no_watchlist_overlap",
                 warning="event_scores_have_no_watchlist_overlap",
             )
+    monitor_progress("读取命中率校准")
+    hit_rate_calibration = load_hit_rate_calibration(Path(args.hit_rate_calibration))
     fetch_start = today - dt.timedelta(days=args.lookback_days)
     price_map: dict[str, list[PriceBar]] = {}
     total_symbols = len(symbols)
@@ -674,7 +730,7 @@ def main() -> int:
             display_price = latest_price if latest_price > 0 else row.close
             first_manage = first_manage_pct_from_target(target)
             first_manage_price = display_price * (1 + first_manage) if has_intraday_data and display_price > 0 else 0.0
-            target_hit_rate, first_manage_hit_rate = historical_hit_rates(str(temperature["state"]))
+            hit_rates = historical_hit_rates(str(temperature["state"]), hit_rate_calibration)
             candidates.append(
                 MonitorCandidate(
                     ticker=row.ticker,
@@ -694,8 +750,11 @@ def main() -> int:
                     trailing_stop_pct=round(trail * 100, 2) if has_intraday_data else 0.0,
                     first_manage_pct=round(first_manage * 100, 2) if has_intraday_data else 0.0,
                     first_manage_price=round(first_manage_price, 4),
-                    target_upper_hit_rate_pct=target_hit_rate,
-                    first_manage_hit_rate_pct=first_manage_hit_rate,
+                    target_upper_hit_rate_pct=hit_rates.target_upper_hit_rate_pct,
+                    target_upper_touch_rate_pct=hit_rates.target_upper_touch_rate_pct,
+                    first_manage_hit_rate_pct=hit_rates.first_manage_hit_rate_pct,
+                    hit_rate_sample_size=hit_rates.sample_size,
+                    hit_rate_source=hit_rates.source,
                     market_state=str(temperature["state"]),
                     event_score=int(event_scores.get(row.ticker, 0)),
                     ma5_distance_pct=row.distance_to_ma5_pct,
@@ -768,6 +827,7 @@ def main() -> int:
         f"- Market state: `{temperature['state']}` breadth_ma20=`{temperature['breadth_ma20']:.2%}` avg5d=`{temperature['avg_5d_return']:.2%}`",
         f"- Event score source: `{event_context.path or '-'}` status=`{event_context.status}` age_days=`{event_context.age_days if event_context.age_days is not None else '-'}` warning=`{event_context.warning or '-'}`",
         f"- Intraday data status: `{intraday_status}`",
+        f"- Hit-rate calibration: `{args.hit_rate_calibration}` status=`{'loaded' if hit_rate_calibration else 'fallback'}`",
         f"- Quote fallback: `{args.quote_fallback}`",
         f"- Entry window end: `{entry_end.isoformat(timespec='minutes')}`",
         f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, atr>=`{active_min_atr:.1f}`, momentum10>=`{active_min_momentum_10d:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
@@ -812,13 +872,13 @@ def main() -> int:
         )
     lines.extend(
         [
-            "| Action | Ticker | Name | Edge | Score | Trigger | Latest | VWAP | Target Upper | First Manage | Stop | Hist Hit | MA5 Dist | Reasons | Risks |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+            "| Action | Ticker | Name | Edge | Score | Trigger | Latest | VWAP | Target Upper | First Manage | Stop | Sellable Upper% | Touch Upper% | Manage% | N | MA5 Dist | Reasons | Risks |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
         ]
     )
     for item in candidates:
         lines.append(
-            f"| {item.action} | {item.ticker} | {item.name} | {item.edge_score:.2f} | {item.score:.1f} | {item.entry_trigger:.2f} | {item.latest_price:.2f} | {item.intraday_vwap:.2f} | {item.target_pct:.2f}% | {item.first_manage_price:.2f} | {item.hard_stop_pct:.2f}% | {item.first_manage_hit_rate_pct:.1f}% | {item.ma5_distance_pct:.2f}% | {item.reasons or '-'} | {item.risks or '-'} |"
+            f"| {item.action} | {item.ticker} | {item.name} | {item.edge_score:.2f} | {item.score:.1f} | {item.entry_trigger:.2f} | {item.latest_price:.2f} | {item.intraday_vwap:.2f} | {item.target_pct:.2f}% | {item.first_manage_price:.2f} | {item.hard_stop_pct:.2f}% | {item.target_upper_hit_rate_pct:.1f}% | {item.target_upper_touch_rate_pct:.1f}% | {item.first_manage_hit_rate_pct:.1f}% | {item.hit_rate_sample_size} | {item.ma5_distance_pct:.2f}% | {item.reasons or '-'} | {item.risks or '-'} |"
         )
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"candidates={len(candidates)} markdown={out_path} csv={csv_path}")

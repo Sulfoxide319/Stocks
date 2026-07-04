@@ -419,7 +419,7 @@ class TradingAssistantApp:
     def create_tree(self, parent: ttk.Frame) -> ttk.Treeview:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
-        columns = ("side", "action", "ticker", "name", "latest", "trigger", "target", "stop", "pnl", "edge", "reason")
+        columns = ("side", "action", "ticker", "name", "latest", "trigger", "target", "first_manage", "stop", "sellable_hit", "touch_hit", "manage_hit", "samples", "pnl", "edge", "reason")
         tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
         headings = {
             "side": "方向",
@@ -429,7 +429,12 @@ class TradingAssistantApp:
             "latest": "最新",
             "trigger": "触发/成本",
             "target": "目标",
+            "first_manage": "管理线",
             "stop": "止损",
+            "sellable_hit": "可卖上沿",
+            "touch_hit": "触及上沿",
+            "manage_hit": "管理线%",
+            "samples": "N",
             "pnl": "盈亏",
             "edge": "Edge",
             "reason": "理由",
@@ -442,12 +447,17 @@ class TradingAssistantApp:
             "latest": 76,
             "trigger": 86,
             "target": 76,
+            "first_manage": 78,
             "stop": 76,
+            "sellable_hit": 78,
+            "touch_hit": 78,
+            "manage_hit": 78,
+            "samples": 52,
             "pnl": 72,
             "edge": 64,
             "reason": 360,
         }
-        numeric = {"latest", "trigger", "target", "stop", "pnl", "edge"}
+        numeric = {"latest", "trigger", "target", "first_manage", "stop", "sellable_hit", "touch_hit", "manage_hit", "samples", "pnl", "edge"}
         for column in columns:
             tree.heading(column, text=headings[column])
             tree.column(column, width=widths[column], anchor="e" if column in numeric else "w", stretch=column == "reason")
@@ -740,7 +750,12 @@ class TradingAssistantApp:
                 self.fmt(row.get("latest_price")),
                 self.fmt(row.get("buy_price")),
                 self.fmt(row.get("target_price")),
+                self.fmt(row.get("first_manage_price")),
                 self.fmt(row.get("hard_stop_price")),
+                "",
+                "",
+                "",
+                "",
                 f"{self.fmt(row.get('pnl_pct'))}%",
                 "",
                 row.get("reason", ""),
@@ -755,7 +770,12 @@ class TradingAssistantApp:
                 self.fmt(row.get("latest_price")),
                 self.fmt(row.get("trigger_price")),
                 self.fmt(row.get("target_price")),
+                self.fmt(row.get("first_manage_price")),
                 self.fmt(row.get("hard_stop_price")),
+                f"{self.fmt(row.get('target_upper_hit_rate_pct'))}%",
+                f"{self.fmt(row.get('target_upper_touch_rate_pct'))}%",
+                f"{self.fmt(row.get('first_manage_hit_rate_pct'))}%",
+                self.fmt(row.get("hit_rate_sample_size")),
                 "",
                 self.fmt(row.get("edge_score")),
                 row.get("reason", ""),
@@ -845,14 +865,17 @@ class TradingAssistantApp:
         values = tree.item(selected[0], "values")
         if not values:
             return
-        side, action, ticker, name, latest, trigger, target, stop, pnl, edge, reason = values
+        side, action, ticker, name, latest, trigger, target, first_manage, stop, sellable_hit, touch_hit, manage_hit, samples, pnl, edge, reason = values
         self.detail_title.set(f"{side} {action} - {ticker} {name}")
         pieces = [
             f"最新价：{latest or '-'}",
             f"触发/成本：{trigger or '-'}",
             f"目标价：{target or '-'}",
+            f"第一管理线：{first_manage or '-'}",
             f"止损价：{stop or '-'}",
         ]
+        if sellable_hit or touch_hit or manage_hit:
+            pieces.append(f"12M概率：可卖上沿 {sellable_hit or '-'} / 触及上沿 {touch_hit or '-'} / 管理线 {manage_hit or '-'} / N={samples or '-'}")
         if pnl:
             pieces.append(f"盈亏：{pnl}")
         if edge:

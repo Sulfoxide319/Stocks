@@ -19,13 +19,13 @@ A candidate may become default only if:
 | # | Target | Current Status | Evidence / Release |
 |---:|---|---|---|
 | 1 | Keep buy universe liquid mainboard only; never write `300/301` buy candidates. | Done, ongoing invariant | v0.4.22+ validation checks |
-| 2 | Separate `目标上沿`, first management line, and actual exit probability in UI/reporting. | Done | v0.4.23, v0.4.24 |
+| 2 | Separate `目标上沿`, first management line, and actual exit probability in UI/reporting. | Done; 12M calibrated hit rates now feed live UI | v0.4.23, v0.4.24, v0.4.36 |
 | 3 | Add official low-noise event scoring without allowing events to bypass VWAP/score/mainboard filters. | Audited; current US event samples have no A-share watchlist overlap, so no default trading impact | v0.4.24, v0.4.35 |
-| 4 | Expose practical sell signal points: target upper, first management, trailing stop, hard stop, VWAP/cost weakness, pre-close weakness. | Done | v0.4.26 |
+| 4 | Expose practical sell signal points: target upper, first management, trailing stop, hard stop, VWAP/cost weakness, pre-close weakness. | Done; strict backtest now exports sell-path audit | v0.4.26, v0.4.36 |
 | 5 | Persist holding management state so repeated scans do not spam first-touch prompts. | Done | v0.4.27 |
 | 6 | Add condition diagnostics for market state, entry timing, volatility, momentum, sector, and exit reason. | Done | v0.4.28 |
 | 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak momentum and low-ATR noise; continue monitoring | v0.4.28, v0.4.32, v0.4.33 |
-| 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; ongoing for sell-state parity | v0.4.29 |
+| 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; sell-path fields now expose parity gaps for target/trailing/VWAP/stop paths | v0.4.29, v0.4.36 |
 | 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Done for stop floor and trailing reference; continue sensitivity checks | v0.4.30, v0.4.31 |
 | 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; continue using before strategy releases | v0.4.34 |
 

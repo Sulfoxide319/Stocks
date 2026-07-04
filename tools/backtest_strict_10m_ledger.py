@@ -353,6 +353,18 @@ def safe_float(value: object) -> float:
         return 0.0
 
 
+def bar_date(bar: IntradayBar | None) -> str:
+    return bar.date.isoformat() if bar else ""
+
+
+def bar_time(bar: IntradayBar | None) -> str:
+    return bar.time.isoformat(timespec="minutes") if bar else ""
+
+
+def rate(numerator: int, denominator: int) -> float:
+    return round(numerator / denominator * 100, 4) if denominator else 0.0
+
+
 def summarize_distribution_group(
     period: str,
     group_type: str,
@@ -737,6 +749,221 @@ def write_distribution_outputs(out_dir: Path, prefix: str, ledger: list[dict[str
     return {"distribution_csv": csv_path, "distribution_md": md_path}
 
 
+def summarize_sell_path_group(period: str, group_type: str, group_value: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    returns = [safe_float(row.get("return_pct")) for row in rows]
+    trades = len(rows)
+    wins = sum(1 for value in returns if value > 0)
+    target_touch = sum(1 for row in rows if truthy(row.get("target_upper_touch")))
+    target_sellable = sum(1 for row in rows if truthy(row.get("target_upper_sellable_hit")))
+    first_manage_touch = sum(1 for row in rows if truthy(row.get("first_manage_touch")))
+    first_manage_sellable = sum(1 for row in rows if truthy(row.get("first_manage_hit")))
+    trailing_active = sum(1 for row in rows if truthy(row.get("trailing_activated")))
+    trailing_exit = sum(1 for row in rows if str(row.get("reason", "")).startswith("trailing_stop"))
+    hard_stop = sum(1 for row in rows if str(row.get("reason", "")).startswith("hard_stop"))
+    vwap_fail = sum(1 for row in rows if str(row.get("reason", "")).startswith("vwap_fail"))
+    time_exit = sum(1 for row in rows if str(row.get("reason", "")).startswith("time_exit"))
+    max_runups = [safe_float(row.get("max_runup_pct")) for row in rows]
+    sellable_runups = [safe_float(row.get("sellable_max_runup_pct")) for row in rows]
+    target_gaps = [safe_float(row.get("target_upper_gap_at_exit_pct")) for row in rows]
+    return {
+        "period": period,
+        "group_type": group_type,
+        "group_value": group_value,
+        "closed_trades": trades,
+        "win_rate_pct": rate(wins, trades),
+        "avg_return_pct": round(sum(returns) / trades, 4) if trades else 0.0,
+        "target_upper_touch_rate_pct": rate(target_touch, trades),
+        "target_upper_sellable_hit_rate_pct": rate(target_sellable, trades),
+        "first_manage_touch_rate_pct": rate(first_manage_touch, trades),
+        "first_manage_sellable_hit_rate_pct": rate(first_manage_sellable, trades),
+        "trailing_activation_rate_pct": rate(trailing_active, trades),
+        "trailing_exit_rate_pct": rate(trailing_exit, trades),
+        "hard_stop_rate_pct": rate(hard_stop, trades),
+        "vwap_fail_rate_pct": rate(vwap_fail, trades),
+        "time_exit_rate_pct": rate(time_exit, trades),
+        "avg_max_runup_pct": round(sum(max_runups) / trades, 4) if trades else 0.0,
+        "avg_sellable_max_runup_pct": round(sum(sellable_runups) / trades, 4) if trades else 0.0,
+        "avg_target_upper_gap_at_exit_pct": round(sum(target_gaps) / trades, 4) if trades else 0.0,
+    }
+
+
+def build_sell_path_summary_rows(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sells = [row for row in ledger if row.get("action") == "SELL"]
+    periods = sorted({str(row.get("period", "")) for row in sells}, key=period_sort_key)
+    rows: list[dict[str, Any]] = []
+    for period in periods:
+        period_sells = [row for row in sells if row.get("period") == period]
+        rows.append(summarize_sell_path_group(period, "overall", "all", period_sells))
+        for field, group_type in (("market_state", "market_state"), ("reason", "exit_reason"), ("setup_type", "setup_type")):
+            values = sorted({str(row.get(field, "") or "unknown") for row in period_sells})
+            for value in values:
+                group = [row for row in period_sells if str(row.get(field, "") or "unknown") == value]
+                rows.append(summarize_sell_path_group(period, group_type, value, group))
+    return rows
+
+
+def build_sell_path_detail_rows(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = [
+        "period",
+        "ticker",
+        "name",
+        "market_state",
+        "setup_type",
+        "score",
+        "date",
+        "entry_time",
+        "exit_time",
+        "reason",
+        "return_pct",
+        "target_upper_price",
+        "target_upper_touch",
+        "target_upper_touch_date",
+        "target_upper_touch_time",
+        "target_upper_sellable_hit",
+        "target_upper_gap_at_exit_pct",
+        "first_manage_price",
+        "first_manage_touch",
+        "first_manage_hit",
+        "trailing_activated",
+        "trailing_stop_price",
+        "hard_stop_price",
+        "vwap_fail_time",
+        "max_below_vwap_count",
+        "min_vwap_distance_pct",
+        "max_runup_pct",
+        "sellable_max_runup_pct",
+        "max_drawdown_pct",
+        "sellable_max_drawdown_pct",
+        "trade_total_realized_pnl",
+        "exit_signal_path",
+    ]
+    return [{field: row.get(field, "") for field in fields} for row in ledger if row.get("action") == "SELL"]
+
+
+def write_sell_path_outputs(out_dir: Path, prefix: str, ledger: list[dict[str, Any]]) -> dict[str, Path]:
+    summary_rows = build_sell_path_summary_rows(ledger)
+    detail_rows = build_sell_path_detail_rows(ledger)
+    summary_csv = out_dir / f"{prefix}_sell_path_summary.csv"
+    detail_csv = out_dir / f"{prefix}_sell_path_detail.csv"
+    md_path = out_dir / f"{prefix}_sell_path.md"
+    for path, rows in ((summary_csv, summary_rows), (detail_csv, detail_rows)):
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()) if rows else [])
+            if rows:
+                writer.writeheader()
+                writer.writerows(rows)
+    lines = [
+        f"# Strict 10m Sell Path Audit - {prefix}",
+        "",
+        "Target upper is split into `touch` (price reached the upper level at any time after entry) and `sellable hit` (reached on a T+1 sellable bar and therefore could trigger a take-profit exit).",
+        "",
+        "## Overall",
+        "",
+        "| Period | Trades | Win% | Avg Return% | Target Touch% | Target Sellable% | First Manage% | Trail Active% | Hard Stop% | VWAP Fail% | Avg Runup% | Avg Target Gap At Exit% |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in summary_rows:
+        if row["group_type"] != "overall":
+            continue
+        lines.append(
+            f"| {row['period']} | {row['closed_trades']} | {row['win_rate_pct']:.2f} | {row['avg_return_pct']:.2f} | {row['target_upper_touch_rate_pct']:.2f} | {row['target_upper_sellable_hit_rate_pct']:.2f} | {row['first_manage_sellable_hit_rate_pct']:.2f} | {row['trailing_activation_rate_pct']:.2f} | {row['hard_stop_rate_pct']:.2f} | {row['vwap_fail_rate_pct']:.2f} | {row['avg_max_runup_pct']:.2f} | {row['avg_target_upper_gap_at_exit_pct']:.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Market State",
+            "",
+            "| Period | State | Trades | Avg Return% | Target Touch% | Target Sellable% | First Manage% | Trail Active% | Hard Stop% | VWAP Fail% |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in summary_rows:
+        if row["group_type"] != "market_state":
+            continue
+        lines.append(
+            f"| {row['period']} | {row['group_value']} | {row['closed_trades']} | {row['avg_return_pct']:.2f} | {row['target_upper_touch_rate_pct']:.2f} | {row['target_upper_sellable_hit_rate_pct']:.2f} | {row['first_manage_sellable_hit_rate_pct']:.2f} | {row['trailing_activation_rate_pct']:.2f} | {row['hard_stop_rate_pct']:.2f} | {row['vwap_fail_rate_pct']:.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Exit Reason",
+            "",
+            "| Period | Exit | Trades | Avg Return% | Target Touch% | First Manage% | Avg Runup% |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in summary_rows:
+        if row["group_type"] != "exit_reason":
+            continue
+        lines.append(
+            f"| {row['period']} | {row['group_value']} | {row['closed_trades']} | {row['avg_return_pct']:.2f} | {row['target_upper_touch_rate_pct']:.2f} | {row['first_manage_sellable_hit_rate_pct']:.2f} | {row['avg_max_runup_pct']:.2f} |"
+        )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"sell_path_summary_csv": summary_csv, "sell_path_detail_csv": detail_csv, "sell_path_md": md_path}
+
+
+def write_hit_rate_calibration_outputs(out_dir: Path, prefix: str, ledger: list[dict[str, Any]]) -> dict[str, Path]:
+    summary_rows = build_sell_path_summary_rows(ledger)
+    csv_path = out_dir / f"{prefix}_hit_rate_calibration.csv"
+    json_path = out_dir / f"{prefix}_hit_rate_calibration.json"
+    latest_json_path = out_dir / "latest_hit_rate_calibration.json"
+    md_path = out_dir / f"{prefix}_hit_rate_calibration.md"
+    calibration_rows = [
+        row
+        for row in summary_rows
+        if row.get("group_type") in {"overall", "market_state"}
+    ]
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(calibration_rows[0].keys()) if calibration_rows else [])
+        if calibration_rows:
+            writer.writeheader()
+            writer.writerows(calibration_rows)
+    payload: dict[str, Any] = {
+        "source_prefix": prefix,
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "default_period": "12M",
+        "periods": {},
+    }
+    for row in calibration_rows:
+        period = str(row["period"])
+        period_data = payload["periods"].setdefault(period, {"overall": None, "market_state": {}})
+        item = {
+            "sample_size": int(row["closed_trades"]),
+            "target_upper_touch_rate_pct": row["target_upper_touch_rate_pct"],
+            "target_upper_sellable_hit_rate_pct": row["target_upper_sellable_hit_rate_pct"],
+            "first_manage_touch_rate_pct": row["first_manage_touch_rate_pct"],
+            "first_manage_sellable_hit_rate_pct": row["first_manage_sellable_hit_rate_pct"],
+            "win_rate_pct": row["win_rate_pct"],
+            "avg_return_pct": row["avg_return_pct"],
+        }
+        if row["group_type"] == "overall":
+            period_data["overall"] = item
+        elif row["group_type"] == "market_state":
+            period_data["market_state"][str(row["group_value"])] = item
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    json_path.write_text(text + "\n", encoding="utf-8")
+    latest_json_path.write_text(text + "\n", encoding="utf-8")
+    lines = [
+        f"# Hit Rate Calibration - {prefix}",
+        "",
+        "The live monitor should use the 12M market-state row when available, then fall back to the 12M overall row.",
+        "",
+        "| Period | Group | Value | Samples | Target Touch% | Target Sellable% | First Manage% | Win% | Avg Return% |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in calibration_rows:
+        lines.append(
+            f"| {row['period']} | {row['group_type']} | {row['group_value']} | {row['closed_trades']} | {row['target_upper_touch_rate_pct']:.2f} | {row['target_upper_sellable_hit_rate_pct']:.2f} | {row['first_manage_sellable_hit_rate_pct']:.2f} | {row['win_rate_pct']:.2f} | {row['avg_return_pct']:.2f} |"
+        )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "hit_rate_calibration_csv": csv_path,
+        "hit_rate_calibration_json": json_path,
+        "latest_hit_rate_calibration_json": latest_json_path,
+        "hit_rate_calibration_md": md_path,
+    }
+
+
 def write_daily_cache(cache_dir: Path, ticker: str, fetch_start: dt.date, fetch_end: dt.date, bars: list[PriceBar]) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{ticker}_{fetch_start:%Y%m%d}_{fetch_end:%Y%m%d}.json"
@@ -870,18 +1097,51 @@ def refine_trade_strict_10m(
     exit_reason = "time_exit_10m"
     best_high = entry_price
     below_vwap_count = 0
+    max_below_vwap_count = 0
     limit_down_blocked_exits = 0
     first_manage_bar: IntradayBar | None = None
+    first_manage_touch_bar: IntradayBar | None = None
     first_manage_price = 0.0
     first_manage_target_pct = first_manage_pct(planned, args)
+    first_manage_raw_price = entry_price * (1 + first_manage_target_pct)
+    target_upper_raw_price = entry_price * (1 + planned.target_pct)
+    target_upper_price = sell_execution_price(target_upper_raw_price, args)
+    hard_stop_price = sell_execution_price(entry_price * (1 - planned.hard_stop_pct), args)
+    target_upper_touch_bar: IntradayBar | None = None
+    target_upper_sellable_bar: IntradayBar | None = None
+    trailing_activation_bar: IntradayBar | None = None
+    trailing_trigger_bar: IntradayBar | None = None
+    trailing_activation_pct = max(0.04, planned.target_pct * 0.4)
+    trailing_stop_price = 0.0
+    trailing_reference_high_at_exit = 0.0
+    hard_stop_bar: IntradayBar | None = None
+    vwap_fail_bar: IntradayBar | None = None
+    vwap_fail_vwap = 0.0
+    vwap_fail_close = 0.0
+    max_high_after_entry = entry_price
+    min_low_after_entry = entry_price
+    max_sellable_high = entry_price
+    min_sellable_low = entry_price
+    min_vwap_distance_pct = 0.0
     for bar in bars:
         if bar.moment <= entry_bar.moment:
             continue
+        max_high_after_entry = max(max_high_after_entry, bar.high)
+        min_low_after_entry = min(min_low_after_entry, bar.low)
+        if first_manage_touch_bar is None and bar.high >= first_manage_raw_price:
+            first_manage_touch_bar = bar
+        if target_upper_touch_bar is None and bar.high >= target_upper_raw_price:
+            target_upper_touch_bar = bar
         if bar.date < first_sell_date:
             if bar.high > best_high:
                 best_high = bar.high
             continue
+        max_sellable_high = max(max_sellable_high, bar.high)
+        min_sellable_low = min(min_sellable_low, bar.low)
         current_vwap = vwap_by_moment.get(bar.moment, bar.close)
+        if current_vwap > 0:
+            distance = (bar.close / current_vwap - 1) * 100
+            min_vwap_distance_pct = min(min_vwap_distance_pct, distance)
         previous_close = previous_close_before(daily_bars, bar.date) or entry_price
         limit_down_blocked = args.reject_limit_exit and is_limit_down(previous_close, bar.close, limit_threshold, args.price_tick)
         if args.trailing_reference_policy == "same_bar_high" and bar.high > best_high:
@@ -897,6 +1157,7 @@ def refine_trade_strict_10m(
             raw_stop_price = max(entry_price * (1 - planned.hard_stop_pct), daily_limit_price(previous_close, limit_threshold, -1, args))
             exit_price = sell_execution_price(raw_stop_price, args)
             exit_reason = "hard_stop_10m"
+            hard_stop_bar = bar
             break
         if first_manage_bar is None and bar.high >= entry_price * (1 + first_manage_target_pct):
             first_manage_bar = bar
@@ -905,9 +1166,13 @@ def refine_trade_strict_10m(
             exit_bar = bar
             exit_price = sell_execution_price(entry_price * (1 + planned.target_pct), args)
             exit_reason = "take_profit_10m"
+            target_upper_sellable_bar = bar
             break
-        if trailing_reference_high >= entry_price * (1 + max(0.04, planned.target_pct * 0.4)):
+        if trailing_reference_high >= entry_price * (1 + trailing_activation_pct):
+            if trailing_activation_bar is None:
+                trailing_activation_bar = bar
             trailing_price = trailing_reference_high * (1 - planned.trailing_stop_pct)
+            trailing_stop_price = sell_execution_price(max(trailing_price, daily_limit_price(previous_close, limit_threshold, -1, args)), args)
             if bar.low <= trailing_price:
                 if limit_down_blocked:
                     limit_down_blocked_exits += 1
@@ -915,11 +1180,14 @@ def refine_trade_strict_10m(
                         best_high = bar.high
                     continue
                 exit_bar = bar
-                exit_price = sell_execution_price(max(trailing_price, daily_limit_price(previous_close, limit_threshold, -1, args)), args)
+                exit_price = trailing_stop_price
                 exit_reason = "trailing_stop_10m"
+                trailing_trigger_bar = bar
+                trailing_reference_high_at_exit = trailing_reference_high
                 break
         if bar.close < current_vwap * (1 - args.vwap_fail_buffer) and bar.close < entry_price:
             below_vwap_count += 1
+            max_below_vwap_count = max(max_below_vwap_count, below_vwap_count)
         else:
             below_vwap_count = 0
         if args.vwap_fail_bars > 0 and below_vwap_count >= args.vwap_fail_bars:
@@ -931,22 +1199,71 @@ def refine_trade_strict_10m(
             exit_bar = bar
             exit_price = sell_execution_price(max(bar.close, daily_limit_price(previous_close, limit_threshold, -1, args)), args)
             exit_reason = "vwap_fail_10m"
+            vwap_fail_bar = bar
+            vwap_fail_vwap = current_vwap
+            vwap_fail_close = bar.close
             break
         if args.trailing_reference_policy == "previous_high" and bar.high > best_high:
             best_high = bar.high
 
     features = dict(planned.features)
+    max_runup_pct = (max_high_after_entry / entry_price - 1) * 100 if entry_price else 0.0
+    max_drawdown_pct = (min_low_after_entry / entry_price - 1) * 100 if entry_price else 0.0
+    sellable_max_runup_pct = (max_sellable_high / entry_price - 1) * 100 if entry_price else 0.0
+    sellable_max_drawdown_pct = (min_sellable_low / entry_price - 1) * 100 if entry_price else 0.0
+    target_upper_gap_at_exit_pct = (target_upper_price / exit_price - 1) * 100 if target_upper_price and exit_price else 0.0
+    exit_path_flags = [
+        f"first_manage_any={bool(first_manage_touch_bar)}",
+        f"first_manage_sellable={bool(first_manage_bar)}",
+        f"target_any={bool(target_upper_touch_bar)}",
+        f"target_sellable={bool(target_upper_sellable_bar)}",
+        f"trail_active={bool(trailing_activation_bar)}",
+        f"exit={exit_reason}",
+    ]
     features.update(
         {
             "entry_time": entry_bar.time.isoformat(timespec="minutes"),
             "exit_time": exit_bar.time.isoformat(timespec="minutes"),
             "entry_vwap": round(entry_vwap, 4),
             "entry_gap_pct": round(gap_pct * 100, 4),
+            "target_upper_price": round(target_upper_price, 4),
+            "target_upper_touch": bool(target_upper_touch_bar),
+            "target_upper_touch_date": bar_date(target_upper_touch_bar),
+            "target_upper_touch_time": bar_time(target_upper_touch_bar),
+            "target_upper_sellable_hit": bool(target_upper_sellable_bar),
+            "target_upper_sellable_date": bar_date(target_upper_sellable_bar),
+            "target_upper_sellable_time": bar_time(target_upper_sellable_bar),
+            "target_upper_gap_at_exit_pct": round(target_upper_gap_at_exit_pct, 4),
             "first_manage_pct": round(first_manage_target_pct * 100, 4),
             "first_manage_hit": bool(first_manage_bar),
             "first_manage_time": first_manage_bar.time.isoformat(timespec="minutes") if first_manage_bar else "",
             "first_manage_date": first_manage_bar.date.isoformat() if first_manage_bar else "",
             "first_manage_price": round(first_manage_price, 4) if first_manage_price else "",
+            "first_manage_touch": bool(first_manage_touch_bar),
+            "first_manage_touch_date": bar_date(first_manage_touch_bar),
+            "first_manage_touch_time": bar_time(first_manage_touch_bar),
+            "hard_stop_price": round(hard_stop_price, 4),
+            "hard_stop_date": bar_date(hard_stop_bar),
+            "hard_stop_time": bar_time(hard_stop_bar),
+            "trailing_activation_pct": round(trailing_activation_pct * 100, 4),
+            "trailing_activated": bool(trailing_activation_bar),
+            "trailing_activation_date": bar_date(trailing_activation_bar),
+            "trailing_activation_time": bar_time(trailing_activation_bar),
+            "trailing_stop_price": round(trailing_stop_price, 4) if trailing_stop_price else "",
+            "trailing_trigger_date": bar_date(trailing_trigger_bar),
+            "trailing_trigger_time": bar_time(trailing_trigger_bar),
+            "trailing_reference_high_at_exit": round(trailing_reference_high_at_exit, 4) if trailing_reference_high_at_exit else "",
+            "vwap_fail_date": bar_date(vwap_fail_bar),
+            "vwap_fail_time": bar_time(vwap_fail_bar),
+            "vwap_fail_vwap": round(vwap_fail_vwap, 4) if vwap_fail_vwap else "",
+            "vwap_fail_close": round(vwap_fail_close, 4) if vwap_fail_close else "",
+            "max_below_vwap_count": max_below_vwap_count,
+            "min_vwap_distance_pct": round(min_vwap_distance_pct, 4),
+            "max_runup_pct": round(max_runup_pct, 4),
+            "max_drawdown_pct": round(max_drawdown_pct, 4),
+            "sellable_max_runup_pct": round(sellable_max_runup_pct, 4),
+            "sellable_max_drawdown_pct": round(sellable_max_drawdown_pct, 4),
+            "exit_signal_path": ";".join(exit_path_flags),
             "execution_interval_minutes": 10,
             "slippage_bps": args.slippage_bps,
             "trailing_reference_policy": args.trailing_reference_policy,
@@ -1076,11 +1393,44 @@ def append_ledger_row(
             "entry_gap_pct": features.get("entry_gap_pct", ""),
             "entry_vwap": features.get("entry_vwap", ""),
             "entry_vwap_distance_pct": round(entry_vwap_distance_pct, 4),
+            "target_upper_price": features.get("target_upper_price", ""),
+            "target_upper_touch": features.get("target_upper_touch", ""),
+            "target_upper_touch_date": features.get("target_upper_touch_date", ""),
+            "target_upper_touch_time": features.get("target_upper_touch_time", ""),
+            "target_upper_sellable_hit": features.get("target_upper_sellable_hit", ""),
+            "target_upper_sellable_date": features.get("target_upper_sellable_date", ""),
+            "target_upper_sellable_time": features.get("target_upper_sellable_time", ""),
+            "target_upper_gap_at_exit_pct": features.get("target_upper_gap_at_exit_pct", ""),
             "first_manage_pct": features.get("first_manage_pct", ""),
             "first_manage_hit": features.get("first_manage_hit", ""),
             "first_manage_time": features.get("first_manage_time", ""),
             "first_manage_date": features.get("first_manage_date", ""),
             "first_manage_price": features.get("first_manage_price", ""),
+            "first_manage_touch": features.get("first_manage_touch", ""),
+            "first_manage_touch_date": features.get("first_manage_touch_date", ""),
+            "first_manage_touch_time": features.get("first_manage_touch_time", ""),
+            "hard_stop_price": features.get("hard_stop_price", ""),
+            "hard_stop_date": features.get("hard_stop_date", ""),
+            "hard_stop_time": features.get("hard_stop_time", ""),
+            "trailing_activation_pct": features.get("trailing_activation_pct", ""),
+            "trailing_activated": features.get("trailing_activated", ""),
+            "trailing_activation_date": features.get("trailing_activation_date", ""),
+            "trailing_activation_time": features.get("trailing_activation_time", ""),
+            "trailing_stop_price": features.get("trailing_stop_price", ""),
+            "trailing_trigger_date": features.get("trailing_trigger_date", ""),
+            "trailing_trigger_time": features.get("trailing_trigger_time", ""),
+            "trailing_reference_high_at_exit": features.get("trailing_reference_high_at_exit", ""),
+            "vwap_fail_date": features.get("vwap_fail_date", ""),
+            "vwap_fail_time": features.get("vwap_fail_time", ""),
+            "vwap_fail_vwap": features.get("vwap_fail_vwap", ""),
+            "vwap_fail_close": features.get("vwap_fail_close", ""),
+            "max_below_vwap_count": features.get("max_below_vwap_count", ""),
+            "min_vwap_distance_pct": features.get("min_vwap_distance_pct", ""),
+            "max_runup_pct": features.get("max_runup_pct", ""),
+            "max_drawdown_pct": features.get("max_drawdown_pct", ""),
+            "sellable_max_runup_pct": features.get("sellable_max_runup_pct", ""),
+            "sellable_max_drawdown_pct": features.get("sellable_max_drawdown_pct", ""),
+            "exit_signal_path": features.get("exit_signal_path", ""),
             "partial_sell_ratio": features.get("partial_sell_ratio", ""),
             "partial_realized_pnl": features.get("partial_realized_pnl", ""),
             "remaining_realized_pnl": features.get("remaining_realized_pnl", ""),
@@ -1553,6 +1903,8 @@ def main() -> int:
     outputs = write_outputs(Path(args.out_dir), prefix, all_ledger, all_daily, summaries)
     outputs.update(write_distribution_outputs(Path(args.out_dir), prefix, all_ledger))
     outputs.update(write_condition_diagnostic_outputs(Path(args.out_dir), prefix, all_ledger))
+    outputs.update(write_sell_path_outputs(Path(args.out_dir), prefix, all_ledger))
+    outputs.update(write_hit_rate_calibration_outputs(Path(args.out_dir), prefix, all_ledger))
     for name, path in outputs.items():
         print(f"{name}={path}", flush=True)
     return 0

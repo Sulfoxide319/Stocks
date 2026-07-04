@@ -1,0 +1,47 @@
+{
+  "source_prefix": "strict_10m_no_events_1M_12M_to_20260703",
+  "generated_at": "2026-07-04T21:03:54",
+  "default_period": "12M",
+  "periods": {
+    "12M": {
+      "overall": {
+        "sample_size": 82,
+        "target_upper_touch_rate_pct": 8.5366,
+        "target_upper_sellable_hit_rate_pct": 8.5366,
+        "first_manage_touch_rate_pct": 47.561,
+        "first_manage_sellable_hit_rate_pct": 39.0244,
+        "win_rate_pct": 46.3415,
+        "avg_return_pct": 1.9332
+      },
+      "market_state": {
+        "cold": {
+          "sample_size": 24,
+          "target_upper_touch_rate_pct": 8.3333,
+          "target_upper_sellable_hit_rate_pct": 8.3333,
+          "first_manage_touch_rate_pct": 41.6667,
+          "first_manage_sellable_hit_rate_pct": 33.3333,
+          "win_rate_pct": 37.5,
+          "avg_return_pct": 1.1507
+        },
+        "narrow_rally": {
+          "sample_size": 8,
+          "target_upper_touch_rate_pct": 12.5,
+          "target_upper_sellable_hit_rate_pct": 12.5,
+          "first_manage_touch_rate_pct": 50.0,
+          "first_manage_sellable_hit_rate_pct": 50.0,
+          "win_rate_pct": 62.5,
+          "avg_return_pct": 3.5864
+        },
+        "normal": {
+          "sample_size": 50,
+          "target_upper_touch_rate_pct": 8.0,
+          "target_upper_sellable_hit_rate_pct": 8.0,
+          "first_manage_touch_rate_pct": 50.0,
+          "first_manage_sellable_hit_rate_pct": 40.0,
+          "win_rate_pct": 48.0,
+          "avg_return_pct": 2.0443
+        }
+      }
+    }
+  }
+}
