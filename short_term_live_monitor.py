@@ -406,6 +406,7 @@ def main() -> int:
     total_symbols = len(symbols)
     yahoo_disabled = False
     yahoo_forbidden_streak = 0
+    yahoo_error_streak = 0
     baostock_daily_client: BaoStockDailyClient | None = None
     def fetch_baostock_daily_for_symbol(ticker: str) -> list[PriceBar]:
         nonlocal baostock_daily_client
@@ -422,7 +423,7 @@ def main() -> int:
             source = "Yahoo"
             try:
                 if yahoo_disabled:
-                    raise RuntimeError("Yahoo disabled after repeated 403 responses")
+                    raise RuntimeError("Yahoo disabled after repeated errors")
                 bars = fetch_yahoo_history(
                     session,
                     symbol.yahoo_symbol or symbol.ticker,
@@ -431,13 +432,18 @@ def main() -> int:
                     timeout_seconds=args.history_timeout,
                 )
                 yahoo_forbidden_streak = 0
+                yahoo_error_streak = 0
             except requests.HTTPError as exc:
                 status_code = exc.response.status_code if exc.response is not None else 0
+                yahoo_error_streak += 1
                 if status_code == 403:
                     yahoo_forbidden_streak += 1
                     if yahoo_forbidden_streak >= 3 and not yahoo_disabled:
                         yahoo_disabled = True
                         monitor_progress("Yahoo 日线连续 403，切换到 BaoStock 日线兜底")
+                if yahoo_error_streak >= 3 and not yahoo_disabled:
+                    yahoo_disabled = True
+                    monitor_progress(f"Yahoo 日线连续 {yahoo_error_streak} 次 HTTP/网络失败，切换到 BaoStock 日线兜底")
                 source = "BaoStock"
                 try:
                     bars = fetch_baostock_daily_for_symbol(symbol.ticker)
@@ -447,18 +453,16 @@ def main() -> int:
                     time.sleep(0.02)
                     continue
             except Exception as exc:
-                if yahoo_disabled:
-                    source = "BaoStock"
-                    try:
-                        bars = fetch_baostock_daily_for_symbol(symbol.ticker)
-                    except Exception as fallback_exc:
-                        price_map[symbol.ticker] = []
-                        monitor_progress(f"历史行情失败：{label} - BaoStock {type(fallback_exc).__name__}: {fallback_exc}")
-                        time.sleep(0.02)
-                        continue
-                else:
+                yahoo_error_streak += 1
+                if yahoo_error_streak >= 3 and not yahoo_disabled:
+                    yahoo_disabled = True
+                    monitor_progress(f"Yahoo 日线连续 {yahoo_error_streak} 次网络失败，切换到 BaoStock 日线兜底")
+                source = "BaoStock"
+                try:
+                    bars = fetch_baostock_daily_for_symbol(symbol.ticker)
+                except Exception as fallback_exc:
                     price_map[symbol.ticker] = []
-                    monitor_progress(f"历史行情失败：{label} - {type(exc).__name__}: {exc}")
+                    monitor_progress(f"历史行情失败：{label} - Yahoo {type(exc).__name__}: {exc}; BaoStock {type(fallback_exc).__name__}: {fallback_exc}")
                     time.sleep(0.02)
                     continue
             price_map[symbol.ticker] = [bar for bar in bars if bar.date <= today]

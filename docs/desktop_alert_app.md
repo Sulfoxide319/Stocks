@@ -29,6 +29,7 @@ run_trading_app.bat
 - Weekend/manual scans use the closed-market daily path instead of intraday quote fallback; `QUOTE_ONLY` rows keep reference trigger/target/stop prices but still block buy confirmation until 5-minute/VWAP data exists.
 - On weekends, the app skips stale opening/intraday/pre-close cached snapshots and loads the latest closed-market snapshot instead.
 - Scan reports and live logs include a filter funnel so it is clear how a large stock pool is reduced to final candidates.
+- Daily history scans switch to BaoStock after repeated Yahoo HTTP/network failures, including read timeouts, instead of waiting per symbol.
 - Opening focus scan during `09:20-09:45`
 - 2-minute intraday buy/sell checks during `09:45-11:30` and `13:00-14:45`
 - Pre-close review during `14:45-15:05`
