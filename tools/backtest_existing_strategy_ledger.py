@@ -70,6 +70,8 @@ def market_temperature(price_map: dict[str, list[PriceBar]], date_value: dt.date
     avg_20d = moving_average(return_20d_values)
     if breadth >= 0.58 and avg_5d >= 0.01 and avg_20d >= 0:
         state = "hot"
+    elif breadth <= 0.42 and avg_5d >= 0.005 and avg_20d > -0.04:
+        state = "narrow_rally"
     elif breadth <= 0.42 or avg_5d <= -0.02 or avg_20d <= -0.04:
         state = "cold"
     else:
@@ -86,30 +88,40 @@ def market_temperature(price_map: dict[str, list[PriceBar]], date_value: dt.date
 def dynamic_param_overrides(state: str, args: argparse.Namespace) -> dict[str, float]:
     if not getattr(args, "dynamic_params", False):
         return {}
+
+    def profile(prefix: str) -> dict[str, float]:
+        base_max_gap_up = getattr(args, "max_gap_up", 0.0)
+        base_gap_volume = getattr(args, "gap_volume_min_ratio", 0.0)
+        base_range = getattr(args, "max_5d_range_pct", 0.0)
+        base_momentum = getattr(args, "max_momentum_10d_pct", 999.0)
+        base_position = getattr(args, "max_close_position_20d_pct", 100.0)
+        base_min_score = getattr(args, "min_score", 0.0)
+        return {
+            "min_score": getattr(args, f"{prefix}_min_score", base_min_score),
+            "max_gap_up": getattr(args, f"{prefix}_max_gap_up", base_max_gap_up),
+            "gap_volume_min_ratio": getattr(args, f"{prefix}_gap_volume_min_ratio", base_gap_volume),
+            "max_5d_range_pct": getattr(args, f"{prefix}_max_5d_range_pct", base_range),
+            "max_momentum_10d_pct": getattr(args, f"{prefix}_max_momentum_10d_pct", base_momentum),
+            "max_close_position_20d_pct": getattr(args, f"{prefix}_max_close_position_20d_pct", base_position),
+        }
+
     if state == "hot":
-        return {
-            "max_5d_range_pct": args.hot_max_5d_range_pct,
-            "max_momentum_10d_pct": args.hot_max_momentum_10d_pct,
-            "max_close_position_20d_pct": args.hot_max_close_position_20d_pct,
-        }
+        return profile("hot")
+    if state == "narrow_rally":
+        return profile("narrow_rally")
     if state == "cold":
-        return {
-            "max_5d_range_pct": args.cold_max_5d_range_pct,
-            "max_momentum_10d_pct": args.cold_max_momentum_10d_pct,
-            "max_close_position_20d_pct": args.cold_max_close_position_20d_pct,
-        }
-    return {
-        "max_5d_range_pct": args.normal_max_5d_range_pct,
-        "max_momentum_10d_pct": args.normal_max_momentum_10d_pct,
-        "max_close_position_20d_pct": args.normal_max_close_position_20d_pct,
-    }
+        return profile("cold")
+    return profile("normal")
 
 
 def planned_passes_dynamic_filters(planned: PlannedTrade, overrides: dict[str, float]) -> bool:
     features = planned.features
+    min_score = float(overrides.get("min_score") or 0.0)
     max_range = float(overrides.get("max_5d_range_pct", 0.0) or 0.0)
     max_momentum = float(overrides.get("max_momentum_10d_pct", 999.0) or 999.0)
     max_position = float(overrides.get("max_close_position_20d_pct", 100.0) or 100.0)
+    if min_score > 0 and planned.score < min_score:
+        return False
     if max_range > 0 and float(features.get("max_5d_range_pct") or 0.0) > max_range:
         return False
     if max_momentum < 999 and float(features.get("momentum_10d_pct") or 0.0) > max_momentum:
@@ -654,16 +666,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-buffer", type=float, default=0.0)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
     parser.add_argument("--dynamic-params", action="store_true", default=True)
+    parser.add_argument("--hot-min-score", type=float, default=90.0)
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
     parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--hot-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--hot-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--hot-max-close-position-20d-pct", type=float, default=85.0)
+    parser.add_argument("--normal-min-score", type=float, default=90.0)
     parser.add_argument("--normal-max-gap-up", type=float, default=0.02)
     parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--normal-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--normal-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--normal-max-close-position-20d-pct", type=float, default=85.0)
+    parser.add_argument("--narrow-rally-min-score", type=float, default=90.0)
+    parser.add_argument("--narrow-rally-max-gap-up", type=float, default=0.01)
+    parser.add_argument("--narrow-rally-gap-volume-min-ratio", type=float, default=1.35)
+    parser.add_argument("--narrow-rally-max-5d-range-pct", type=float, default=25.0)
+    parser.add_argument("--narrow-rally-max-momentum-10d-pct", type=float, default=20.0)
+    parser.add_argument("--narrow-rally-max-close-position-20d-pct", type=float, default=80.0)
+    parser.add_argument("--cold-min-score", type=float, default=90.0)
     parser.add_argument("--cold-max-gap-up", type=float, default=0.01)
     parser.add_argument("--cold-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--cold-max-5d-range-pct", type=float, default=25.0)

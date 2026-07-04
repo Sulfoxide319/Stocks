@@ -225,7 +225,7 @@ def max_affordable_lot_shares(cash_budget: float, price: float, args: argparse.N
 def market_capital_factor(state: str, args: argparse.Namespace) -> float:
     if state == "hot":
         return max(0.0, min(1.0, float(args.hot_capital_factor)))
-    if state == "cold":
+    if state in {"cold", "narrow_rally"}:
         return max(0.0, min(1.0, float(args.cold_capital_factor)))
     return max(0.0, min(1.0, float(args.normal_capital_factor)))
 
@@ -745,12 +745,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hot-capital-factor", type=float, default=0.0)
     parser.add_argument("--normal-capital-factor", type=float, default=1.0)
     parser.add_argument("--cold-capital-factor", type=float, default=0.75)
+    parser.add_argument("--hot-min-score", type=float, default=90.0)
+    parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
+    parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--hot-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--hot-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--hot-max-close-position-20d-pct", type=float, default=85.0)
+    parser.add_argument("--normal-min-score", type=float, default=90.0)
+    parser.add_argument("--normal-max-gap-up", type=float, default=0.02)
+    parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--normal-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--normal-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--normal-max-close-position-20d-pct", type=float, default=85.0)
+    parser.add_argument("--narrow-rally-min-score", type=float, default=90.0)
+    parser.add_argument("--narrow-rally-max-gap-up", type=float, default=0.01)
+    parser.add_argument("--narrow-rally-gap-volume-min-ratio", type=float, default=1.35)
+    parser.add_argument("--narrow-rally-max-5d-range-pct", type=float, default=25.0)
+    parser.add_argument("--narrow-rally-max-momentum-10d-pct", type=float, default=20.0)
+    parser.add_argument("--narrow-rally-max-close-position-20d-pct", type=float, default=80.0)
+    parser.add_argument("--cold-min-score", type=float, default=90.0)
+    parser.add_argument("--cold-max-gap-up", type=float, default=0.01)
+    parser.add_argument("--cold-gap-volume-min-ratio", type=float, default=1.5)
     parser.add_argument("--cold-max-5d-range-pct", type=float, default=25.0)
     parser.add_argument("--cold-max-momentum-10d-pct", type=float, default=20.0)
     parser.add_argument("--cold-max-close-position-20d-pct", type=float, default=80.0)

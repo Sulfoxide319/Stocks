@@ -438,6 +438,10 @@ class CandidateWatchWorker(QThread):
             unavailable = 0
             closest_distance_pct: float | None = None
             for item in buys[: self.limit]:
+                if item.get("buy_enabled") is False:
+                    item["action"] = "WATCH_BUY"
+                    item["reason"] = "监听：观察池标的低于买入分数线，仅跟踪，不触发买入"
+                    continue
                 quote = fetch_sina_quote(session, str(item.get("ticker") or ""))
                 if not quote:
                     unavailable += 1

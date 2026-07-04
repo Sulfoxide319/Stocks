@@ -355,7 +355,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--today", default="")
     parser.add_argument("--lookback-days", type=int, default=160)
     parser.add_argument("--history-timeout", type=float, default=8.0, help="seconds per Yahoo history request")
-    parser.add_argument("--min-score", type=float, default=90)
+    parser.add_argument("--min-score", type=float, default=83)
+    parser.add_argument("--buy-min-score", type=float, default=90)
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--min-traded-value", type=float, default=200_000_000)
     parser.add_argument("--ma5-extension-limit", type=float, default=0.04)
@@ -372,16 +373,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-close-position-20d-pct", type=float, default=100.0)
     parser.add_argument("--dynamic-params", action="store_true")
     parser.add_argument("--skip-hot-entries", action="store_true")
+    parser.add_argument("--hot-min-score", type=float, default=90.0)
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
     parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--hot-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--hot-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--hot-max-close-position-20d-pct", type=float, default=85.0)
+    parser.add_argument("--normal-min-score", type=float, default=87.0)
     parser.add_argument("--normal-max-gap-up", type=float, default=0.02)
     parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--normal-max-5d-range-pct", type=float, default=32.0)
     parser.add_argument("--normal-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--normal-max-close-position-20d-pct", type=float, default=85.0)
+    parser.add_argument("--narrow-rally-min-score", type=float, default=83.0)
+    parser.add_argument("--narrow-rally-max-gap-up", type=float, default=0.01)
+    parser.add_argument("--narrow-rally-gap-volume-min-ratio", type=float, default=1.35)
+    parser.add_argument("--narrow-rally-max-5d-range-pct", type=float, default=32.0)
+    parser.add_argument("--narrow-rally-max-momentum-10d-pct", type=float, default=26.0)
+    parser.add_argument("--narrow-rally-max-close-position-20d-pct", type=float, default=88.0)
+    parser.add_argument("--cold-min-score", type=float, default=87.0)
     parser.add_argument("--cold-max-gap-up", type=float, default=-1.0)
     parser.add_argument("--cold-gap-volume-min-ratio", type=float, default=99.0)
     parser.add_argument("--cold-max-5d-range-pct", type=float, default=1.0)
@@ -507,6 +517,7 @@ def main() -> int:
     overrides = dynamic_param_overrides(str(temperature["state"]), args)
     active_max_gap_up = float(overrides.get("max_gap_up", args.max_gap_up))
     active_gap_volume_min_ratio = float(overrides.get("gap_volume_min_ratio", args.gap_volume_min_ratio))
+    active_min_score = float(overrides.get("min_score", args.min_score))
     active_max_5d_range = float(overrides.get("max_5d_range_pct", args.max_5d_range_pct))
     active_max_momentum_10d = float(overrides.get("max_momentum_10d_pct", args.max_momentum_10d_pct))
     active_max_close_position = float(overrides.get("max_close_position_20d_pct", args.max_close_position_20d_pct))
@@ -553,7 +564,7 @@ def main() -> int:
             if active_max_close_position < 100 and row.close_position_20d_pct > active_max_close_position:
                 filter_counts["close_position_too_high"] += 1
                 continue
-            strategy_reason = strategy_reject_reason(row, args.min_score, args.ma5_extension_limit)
+            strategy_reason = strategy_reject_reason(row, active_min_score, args.ma5_extension_limit)
             if strategy_reason:
                 filter_counts[strategy_reason] += 1
                 continue
@@ -566,7 +577,10 @@ def main() -> int:
             trigger = row.close * (1 + args.confirm_buffer)
             reasons: list[str] = []
             risks: list[str] = []
-            if args.mode == "intraday":
+            if row.score < args.buy_min_score:
+                action = "WATCH_SCORE_ONLY"
+                risks.append(f"score={row.score:.1f}<buy_min_score={args.buy_min_score:.1f}")
+            elif args.mode == "intraday":
                 monitor_progress(f"盘中数据：{row.ticker} {row.name}")
                 action, latest_price, vwap, intraday_time, trigger, reasons, risks = latest_intraday_state(
                     row.ticker,
@@ -635,6 +649,7 @@ def main() -> int:
         "WATCH": 3,
         "WAIT_0945": 2,
         "WATCH_NEXT_SESSION": 2,
+        "WATCH_SCORE_ONLY": 2,
         "NO_NEW_ENTRY": 1,
         "QUOTE_ONLY": 0,
         "DATA_UNAVAILABLE": 0,
@@ -673,7 +688,7 @@ def main() -> int:
         f"- Intraday data status: `{intraday_status}`",
         f"- Quote fallback: `{args.quote_fallback}`",
         f"- Entry window end: `{args.entry_end_time}`",
-        f"- Active filters: gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
+        f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
         "",
         "## Filter Funnel",
         "",

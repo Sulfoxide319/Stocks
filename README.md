@@ -10,7 +10,9 @@ This project focuses on buyable A-share short-term candidates under the current 
 - No ChiNext `300/301`, STAR Market, or US stocks in the default live package
 - T+1 execution: positions bought today cannot be sold today
 - Dynamic market regime filter: skip new hot-market entries; normal uses full
-  size; cold uses reduced risk in strict backtests
+  size; cold and narrow-rally execution use reduced risk in strict backtests
+- Observation pool is wider than the buy trigger pool: low-score candidates can
+  be tracked without being eligible for automatic BUY alerts
 - 5-minute BaoStock/VWAP execution layer
 - Buy confirmation requires price above both the trigger and buffered VWAP
 - Local-only Xueqiu cookie support

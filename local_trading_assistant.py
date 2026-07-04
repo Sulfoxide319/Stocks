@@ -30,7 +30,13 @@ MONITOR_DEFAULT_ARGS = [
     "--dynamic-params",
     "--history-timeout",
     "5",
+    "--min-score",
+    "83",
+    "--buy-min-score",
+    "90",
     "--skip-hot-entries",
+    "--hot-min-score",
+    "90",
     "--max-gap-up",
     "0.02",
     "--gap-volume-threshold",
@@ -47,6 +53,22 @@ MONITOR_DEFAULT_ARGS = [
     "26",
     "--max-close-position-20d-pct",
     "85",
+    "--normal-min-score",
+    "87",
+    "--narrow-rally-min-score",
+    "83",
+    "--narrow-rally-max-gap-up",
+    "0.01",
+    "--narrow-rally-gap-volume-min-ratio",
+    "1.35",
+    "--narrow-rally-max-5d-range-pct",
+    "32",
+    "--narrow-rally-max-momentum-10d-pct",
+    "26",
+    "--narrow-rally-max-close-position-20d-pct",
+    "88",
+    "--cold-min-score",
+    "87",
     "--cold-max-gap-up",
     "0.01",
     "--cold-gap-volume-min-ratio",
@@ -75,6 +97,7 @@ class BuyAdvice:
     hard_stop_pct: float
     edge_score: float
     reason: str
+    buy_enabled: bool = True
 
 
 @dataclass
@@ -303,6 +326,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         if action == "DATA_UNAVAILABLE":
             priority = 9
             final_action = "DATA_UNAVAILABLE"
+            buy_enabled = False
             ref_price = 0.0
             trigger = 0.0
             vwap = 0.0
@@ -312,23 +336,33 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         elif action == "QUOTE_ONLY":
             priority = 8
             final_action = "QUOTE_ONLY"
+            buy_enabled = False
             vwap = 0.0
             reason = "仅有实时报价兜底，缺少5分钟线/VWAP确认；价位仅作参考，暂停买入判断"
         elif action == "BUY_TRIGGER":
             priority = 1
             final_action = "BUY_NOW"
+            buy_enabled = True
             reason = "价格站上触发价和VWAP，且没有被高开/过热过滤拦截"
+        elif action == "WATCH_SCORE_ONLY":
+            priority = 4
+            final_action = "WATCH_BUY"
+            buy_enabled = False
+            reason = "进入观察池，但低于买入分数线；仅跟踪，不触发买入"
         elif action in {"WATCH", "WATCH_NEXT_SESSION"}:
             priority = 2 if phase in {"opening", "intraday"} else 4
             final_action = "WATCH_BUY"
+            buy_enabled = True
             reason = "保留关注，等价格重新站上触发价/VWAP"
         elif action in {"WAIT_0945", "WAIT_SESSION"}:
             priority = 3
             final_action = "WAIT"
+            buy_enabled = True
             reason = "还没到有效买入确认窗口或暂无日内数据"
         else:
             priority = 5
             final_action = "NO_BUY"
+            buy_enabled = False
             reason = row.get("risks", "") or action or "未通过盘中执行过滤"
         advices.append(
             BuyAdvice(
@@ -345,6 +379,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
                 hard_stop_pct=stop_pct,
                 edge_score=parse_float(row.get("edge_score")),
                 reason=reason,
+                buy_enabled=buy_enabled,
             )
         )
     return sorted(advices, key=lambda item: (item.priority, -item.edge_score))
