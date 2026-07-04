@@ -1417,7 +1417,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vwap-buffer", type=float, default=0.003)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
     parser.add_argument("--vwap-fail-bars", type=int, default=1)
-    parser.add_argument("--vwap-fail-buffer", type=float, default=0.001)
+    parser.add_argument("--vwap-fail-buffer", type=float, default=0.0)
     parser.add_argument("--dynamic-params", action="store_true", default=True)
     parser.add_argument("--hot-capital-factor", type=float, default=0.0)
     parser.add_argument("--normal-capital-factor", type=float, default=1.0)
