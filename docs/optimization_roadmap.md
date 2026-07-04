@@ -27,7 +27,15 @@ A candidate may become default only if:
 | 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak momentum and low-ATR noise; v0.4.38 follow-up rejected simple cold/sector filters as over-filtering | v0.4.28, v0.4.32, v0.4.33, docs/optimization_experiment_log.md |
 | 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; managed-position VWAP weakness now uses a two-confirmation path in backtest and live alerts | v0.4.29, v0.4.36, v0.4.37 |
 | 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Improved for first-management VWAP pullbacks and normal-market trailing winners; v0.4.38 follow-up rejected global VWAP delay/buffer changes | v0.4.30, v0.4.31, v0.4.37, v0.4.38, docs/optimization_experiment_log.md |
-| 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; v0.4.38 beat v0.4.37 proxy on 9/9 rolling returns, with one 6M rolling DD micro-increase documented as a return/DD tradeoff | v0.4.34, v0.4.37, v0.4.38 |
+| 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; added reusable baseline-vs-candidate summary comparison so return/DD/trade/hard-check gates are machine-checked before accepting defaults | v0.4.34, v0.4.37, v0.4.38, tools/compare_backtest_summaries.py |
+
+## Current Research Leads
+
+| Lead | Evidence | Default Decision |
+|---|---|---|
+| Conditional concentration / aggressive profile | `max-positions=2` with 70% capital per state lifts 1M/3M/6M/9M/12M returns to `15.1691%/42.3105%/68.1952%/74.3256%/74.5904%`, with clean `bad_300_301/bad_lots/bad_tick=0/0/0`. | Not default: 12M max drawdown rises from `7.2032%` to `8.0944%`. Needs a drawdown-aware governor or low-risk regime condition. |
+| Quality sorting | `--selection-mode quality` holds 12M DD flat and slightly improves 6M/9M/12M. | Not default: 1M and 3M returns are lower than v0.4.38. |
+| Simple cold/sector filters | Multiple follow-up tests in `docs/optimization_experiment_log.md`. | Rejected: over-filtering removes profitable rebounds. |
 
 ## Current Baseline
 
