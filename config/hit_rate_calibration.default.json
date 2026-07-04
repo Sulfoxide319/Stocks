@@ -1,6 +1,6 @@
 {
   "source_prefix": "strict_10m_no_events_1M_12M_to_20260703",
-  "generated_at": "2026-07-04T21:03:54",
+  "generated_at": "2026-07-04T21:24:41",
   "default_period": "12M",
   "periods": {
     "12M": {
@@ -10,8 +10,8 @@
         "target_upper_sellable_hit_rate_pct": 8.5366,
         "first_manage_touch_rate_pct": 47.561,
         "first_manage_sellable_hit_rate_pct": 39.0244,
-        "win_rate_pct": 46.3415,
-        "avg_return_pct": 1.9332
+        "win_rate_pct": 47.561,
+        "avg_return_pct": 2.0421
       },
       "market_state": {
         "cold": {
@@ -38,8 +38,8 @@
           "target_upper_sellable_hit_rate_pct": 8.0,
           "first_manage_touch_rate_pct": 50.0,
           "first_manage_sellable_hit_rate_pct": 40.0,
-          "win_rate_pct": 48.0,
-          "avg_return_pct": 2.0443
+          "win_rate_pct": 50.0,
+          "avg_return_pct": 2.2229
         }
       }
     }

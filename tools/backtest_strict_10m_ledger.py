@@ -1118,6 +1118,7 @@ def refine_trade_strict_10m(
     vwap_fail_bar: IntradayBar | None = None
     vwap_fail_vwap = 0.0
     vwap_fail_close = 0.0
+    effective_vwap_fail_bars = int(args.vwap_fail_bars)
     max_high_after_entry = entry_price
     min_low_after_entry = entry_price
     max_sellable_high = entry_price
@@ -1190,7 +1191,10 @@ def refine_trade_strict_10m(
             max_below_vwap_count = max(max_below_vwap_count, below_vwap_count)
         else:
             below_vwap_count = 0
-        if args.vwap_fail_bars > 0 and below_vwap_count >= args.vwap_fail_bars:
+        effective_vwap_fail_bars = int(args.vwap_fail_bars)
+        if first_manage_bar is not None and int(args.vwap_fail_after_first_manage_bars) > 0:
+            effective_vwap_fail_bars = int(args.vwap_fail_after_first_manage_bars)
+        if effective_vwap_fail_bars > 0 and below_vwap_count >= effective_vwap_fail_bars:
             if limit_down_blocked:
                 limit_down_blocked_exits += 1
                 if args.trailing_reference_policy == "previous_high" and bar.high > best_high:
@@ -1257,6 +1261,7 @@ def refine_trade_strict_10m(
             "vwap_fail_time": bar_time(vwap_fail_bar),
             "vwap_fail_vwap": round(vwap_fail_vwap, 4) if vwap_fail_vwap else "",
             "vwap_fail_close": round(vwap_fail_close, 4) if vwap_fail_close else "",
+            "vwap_fail_required_bars": effective_vwap_fail_bars if vwap_fail_bar else "",
             "max_below_vwap_count": max_below_vwap_count,
             "min_vwap_distance_pct": round(min_vwap_distance_pct, 4),
             "max_runup_pct": round(max_runup_pct, 4),
@@ -1424,6 +1429,7 @@ def append_ledger_row(
             "vwap_fail_time": features.get("vwap_fail_time", ""),
             "vwap_fail_vwap": features.get("vwap_fail_vwap", ""),
             "vwap_fail_close": features.get("vwap_fail_close", ""),
+            "vwap_fail_required_bars": features.get("vwap_fail_required_bars", ""),
             "max_below_vwap_count": features.get("max_below_vwap_count", ""),
             "min_vwap_distance_pct": features.get("min_vwap_distance_pct", ""),
             "max_runup_pct": features.get("max_runup_pct", ""),
@@ -1686,6 +1692,8 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "partial_sell_ratio_cold": args.partial_sell_ratio_cold,
         "partial_sell_ratio_narrow_rally": args.partial_sell_ratio_narrow_rally,
         "trailing_reference_policy": args.trailing_reference_policy,
+        "vwap_fail_bars": args.vwap_fail_bars,
+        "vwap_fail_after_first_manage_bars": args.vwap_fail_after_first_manage_bars,
         "cold_min_traded_value_ratio": args.cold_min_traded_value_ratio,
         "cold_min_atr_pct": args.cold_min_atr_pct,
         "cold_min_momentum_10d_pct": args.cold_min_momentum_10d_pct,
@@ -1790,6 +1798,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vwap-buffer", type=float, default=0.003)
     parser.add_argument("--max-entry-extension", type=float, default=0.04)
     parser.add_argument("--vwap-fail-bars", type=int, default=1)
+    parser.add_argument("--vwap-fail-after-first-manage-bars", type=int, default=2)
     parser.add_argument("--vwap-fail-buffer", type=float, default=0.0)
     parser.add_argument("--dynamic-params", action="store_true", default=True)
     parser.add_argument("--hot-capital-factor", type=float, default=0.0)

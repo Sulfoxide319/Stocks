@@ -614,8 +614,12 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                 action = "TAKE_PROFIT"
                 reason = f"达到目标上沿 {target_price:.2f}"
             elif first_manage_hit and vwap > 0 and latest < vwap and latest_time >= "09:45":
-                action = "REDUCE_PROFIT"
-                reason = f"已触及第一管理线 {first_manage_price:.2f}，但跌回VWAP {vwap:.2f} 下方，提示保护利润/减仓"
+                if clean_text(row.get("last_signal_action")) == "VWAP_WEAK_CONFIRM":
+                    action = "REDUCE_PROFIT"
+                    reason = f"已触及第一管理线 {first_manage_price:.2f}，连续两次弱于VWAP {vwap:.2f}，提示保护利润/减仓"
+                else:
+                    action = "VWAP_WEAK_CONFIRM"
+                    reason = f"已触及第一管理线 {first_manage_price:.2f}，首次跌回VWAP {vwap:.2f} 下方，先确认一轮；若下一次扫描仍弱再减仓"
             elif first_manage_hit and trailing_stop_price > 0 and latest <= trailing_stop_price:
                 action = "REDUCE_PROFIT"
                 reason = f"已触及第一管理线 {first_manage_price:.2f}，从持仓高点 {highest:.2f} 回撤超过 {trailing_stop_pct:.1f}%，提示保护利润/减仓"
