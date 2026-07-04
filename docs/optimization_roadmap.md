@@ -27,7 +27,7 @@ A candidate may become default only if:
 | 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak momentum and low-ATR noise; continue monitoring | v0.4.28, v0.4.32, v0.4.33 |
 | 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; ongoing for sell-state parity | v0.4.29 |
 | 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Done for stop floor and trailing reference; continue sensitivity checks | v0.4.30, v0.4.31 |
-| 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Pending | Next research target |
+| 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; continue using before strategy releases | v0.4.34 |
 
 ## Current Baseline
 
