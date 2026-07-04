@@ -358,6 +358,30 @@ def load_latest_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def load_latest_snapshot_excluding(conn: sqlite3.Connection, excluded_phases: set[str]) -> dict[str, Any]:
+    if not excluded_phases:
+        return load_latest_snapshot(conn)
+    placeholders = ",".join("?" for _ in excluded_phases)
+    rows = conn.execute(
+        f"""
+        SELECT payload_json
+        FROM scan_snapshots
+        WHERE phase NOT IN ({placeholders})
+        ORDER BY generated_at DESC, id DESC
+        LIMIT 20
+        """,
+        tuple(sorted(excluded_phases)),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
 def migrate_legacy_files(conn: sqlite3.Connection, legacy_root: Path) -> list[str]:
     notes: list[str] = []
     if get_setting(conn, "legacy_positions_imported") != "1":

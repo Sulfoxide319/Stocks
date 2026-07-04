@@ -30,6 +30,7 @@ from app_storage import (
     import_positions_csv,
     list_positions,
     load_latest_snapshot,
+    load_latest_snapshot_excluding,
     migrate_legacy_files,
     save_position,
     set_setting,
@@ -855,6 +856,10 @@ class MainWindow(QMainWindow):
     def load_cached_snapshot(self) -> None:
         with connect(self.db_path) as conn:
             payload = load_latest_snapshot(conn)
+            skipped_phase = ""
+            if self.should_skip_cached_snapshot(payload):
+                skipped_phase = str(payload.get("phase", ""))
+                payload = load_latest_snapshot_excluding(conn, {"opening", "intraday", "preclose"})
         if payload:
             self.current_payload = payload
             self.render_payload(payload)
@@ -863,7 +868,17 @@ class MainWindow(QMainWindow):
             self.phase_label.setText(f"阶段：{payload.get('phase', '-')}")
             self.status_label.setText("已加载上次结果")
             self.progress.setValue(100)
+            if skipped_phase:
+                self.append_log(f"跳过非交易日盘中缓存：{skipped_phase}")
             self.append_log(f"已加载上次扫描结果：{generated}")
+
+    @staticmethod
+    def should_skip_cached_snapshot(payload: dict[str, Any]) -> bool:
+        if not payload:
+            return False
+        if dt.datetime.now().weekday() < 5:
+            return False
+        return str(payload.get("phase", "")).lower() in {"opening", "intraday", "preclose"}
 
     def render_payload(self, payload: dict[str, Any]) -> None:
         self.current_payload = payload
