@@ -26,8 +26,18 @@ def parse_csv_list(raw: str) -> list[str]:
     return [item.strip() for item in str(raw or "").split(",") if item.strip()]
 
 
-def default_scenarios(include_v0432_proxy: bool) -> list[Scenario]:
+def default_scenarios(include_v0432_proxy: bool, include_v0438_proxy: bool) -> list[Scenario]:
     scenarios = [Scenario("current_default", [])]
+    if include_v0438_proxy:
+        scenarios.append(
+            Scenario(
+                "v0438_proxy",
+                [
+                    "--profit-cushion-aggressive-threshold",
+                    "0",
+                ],
+            )
+        )
     if include_v0432_proxy:
         scenarios.append(
             Scenario(
@@ -226,6 +236,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", default="output/rolling_strict_10m_validation")
     parser.add_argument("--baseline-name", default="v0432_proxy")
     parser.add_argument("--no-v0432-proxy", action="store_true")
+    parser.add_argument("--include-v0438-proxy", action="store_true")
     parser.add_argument("--reuse-existing", action="store_true", help="Reuse matching summary/ledger files instead of rerunning backtests.")
     return parser
 
@@ -233,7 +244,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_arg_parser().parse_args()
     out_root = Path(args.out_dir)
-    scenarios = default_scenarios(not args.no_v0432_proxy)
+    scenarios = default_scenarios(not args.no_v0432_proxy, args.include_v0438_proxy)
     rows: list[dict[str, Any]] = []
     for end_date in parse_csv_list(args.end_dates):
         for scenario in scenarios:

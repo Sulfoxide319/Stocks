@@ -43,8 +43,20 @@ The remaining 12M drag is concentrated in trades that never reach the first mana
 | `scenario_v0439_maxpos2_cap070_trail033` | `--max-positions 2 --normal-capital-factor 0.70 --cold-capital-factor 0.70 --normal-trail-atr-mult 0.33` | 15.1691% | 42.3105% | 68.1952% | 71.9333% | 72.3449% | +1.8717 pct | 8.0944% | 72 | Reject: tighter normal trailing lowers return without fixing 12M DD |
 | `scenario_v0439_maxpos2_cap070_trail032` | `--max-positions 2 --normal-capital-factor 0.70 --cold-capital-factor 0.70 --normal-trail-atr-mult 0.32` | 15.1691% | 42.3105% | 68.1952% | 71.9465% | 72.3662% | +1.8930 pct | 8.0944% | 72 | Reject: same DD problem as cap070 with less return |
 
+### Accepted Candidate
+
+| Scenario | Change | 1M | 3M | 6M | 9M | 12M | 12M Delta vs v0.4.38 | 12M DD | 12M Trades | Decision |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `backtest_strict_10m_v0439_candidate` | Profit-cushion aggressive mode: activate only after current equity return reaches `8%` and at least `120` trading days have elapsed, then use `max_positions=2` with `normal/cold capital factor=0.70` for new entries | 13.7512% | 41.5900% | 64.9549% | 71.2338% | 72.3845% | +1.9113 pct | 7.2032% | 75 | Accept: fixed-window returns are non-lower, 12M DD is flat, 12M trades stay above 80%, and hard checks remain `0/0/0` |
+
+Rejected variants around the accepted rule:
+
+- `8%` cushion with no maturity delay improved 12M more aggressively but hurt the `2026-05-29` rolling 3M/6M windows.
+- `8%` cushion with `90` trading days passed the fixed-window gate but still hurt the `2026-05-29` rolling 6M window.
+- Higher `18%/20%/25%` cushions delayed activation too much and failed one or more fixed windows, especially 6M.
+
 ### Takeaway
 
-The next viable improvement probably needs a more local rule than simple cold-state tightening, global sector filtering, delayed VWAP failure, or blunt concentration. `max-positions=2` confirms that capital concentration is a real profit source, but the added drawdown is not yet acceptable for the steady default. Good next candidates should either make concentration conditional on low-risk regimes or add a drawdown-aware exposure governor.
+The next viable improvement probably needs a more local rule than simple cold-state tightening, global sector filtering, delayed VWAP failure, or blunt concentration. `max-positions=2` confirms that capital concentration is a real profit source, but the added drawdown is not acceptable unless the strategy first earns a mature profit cushion. The accepted v0.4.39 rule turns concentration into a late-stage exposure upgrade instead of a permanent default.
 
 Validation aid added after these trials: `tools/compare_backtest_summaries.py`. The comparison report at `output/scenario_v0439_comparison/summary_comparison.md` shows every tested concentration candidate failing the default acceptance gate even when returns and hard checks pass.

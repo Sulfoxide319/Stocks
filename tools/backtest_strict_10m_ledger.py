@@ -27,6 +27,7 @@ from short_term_strategy_backtest import (
     PlannedTrade,
     build_bar_maps,
     build_signal_rows,
+    current_drawdown_fraction,
     evaluate_regime,
     max_drawdown,
     passes_strategy,
@@ -240,6 +241,47 @@ def market_capital_factor(state: str, args: argparse.Namespace) -> float:
     if state in {"cold", "narrow_rally"}:
         return max(0.0, min(1.0, float(args.cold_capital_factor)))
     return max(0.0, min(1.0, float(args.normal_capital_factor)))
+
+
+def drawdown_capital_factor(daily: list[dict[str, Any]], args: argparse.Namespace) -> tuple[float, float, bool]:
+    threshold = float(args.equity_drawdown_capital_threshold)
+    if threshold <= 0 or not daily:
+        return 1.0, 0.0, False
+    drawdown = current_drawdown_fraction(daily, args.initial_cash)
+    if drawdown < threshold:
+        return 1.0, drawdown, False
+    factor = max(0.0, min(1.0, float(args.equity_drawdown_capital_factor)))
+    return factor, drawdown, True
+
+
+def profit_cushion_aggressive_active(daily: list[dict[str, Any]], args: argparse.Namespace) -> tuple[bool, float]:
+    threshold = float(args.profit_cushion_aggressive_threshold)
+    if threshold <= 0 or not daily:
+        return False, 0.0
+    equity = float(daily[-1]["equity"])
+    return_pct = equity / args.initial_cash - 1 if args.initial_cash else 0.0
+    min_days = max(0, int(args.profit_cushion_min_trading_days))
+    if len(daily) < min_days:
+        return False, return_pct
+    return return_pct >= threshold, return_pct
+
+
+def effective_max_positions(aggressive_active: bool, args: argparse.Namespace) -> int:
+    if aggressive_active and int(args.profit_cushion_max_positions) > 0:
+        return max(1, int(args.profit_cushion_max_positions))
+    return max(1, int(args.max_positions))
+
+
+def effective_market_capital_factor(state: str, aggressive_active: bool, args: argparse.Namespace) -> float:
+    if not aggressive_active:
+        return market_capital_factor(state, args)
+    if state == "hot":
+        return max(0.0, min(1.0, float(args.hot_capital_factor)))
+    if state in {"cold", "narrow_rally"} and float(args.profit_cushion_cold_capital_factor) >= 0:
+        return max(0.0, min(1.0, float(args.profit_cushion_cold_capital_factor)))
+    if state not in {"cold", "narrow_rally"} and float(args.profit_cushion_normal_capital_factor) >= 0:
+        return max(0.0, min(1.0, float(args.profit_cushion_normal_capital_factor)))
+    return market_capital_factor(state, args)
 
 
 def first_manage_pct(planned: PlannedTrade, args: argparse.Namespace) -> float:
@@ -1504,10 +1546,17 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
     cooldown_until: dt.date | None = None
     skipped_candidates = 0
     skipped_no_lot = 0
+    drawdown_governor_hits = 0
+    profit_cushion_aggressive_days = 0
 
     for date_value in trading_dates:
         temperature = market_temperature(price_map, date_value)
         overrides = dynamic_param_overrides(str(temperature["state"]), args)
+        dd_capital_factor, dd_fraction, dd_governor_active = drawdown_capital_factor(daily, args)
+        aggressive_active, cushion_return = profit_cushion_aggressive_active(daily, args)
+        max_positions_for_day = effective_max_positions(aggressive_active, args)
+        if aggressive_active:
+            profit_cushion_aggressive_days += 1
         regime, cooldown_until = evaluate_regime(
             date_value,
             [],
@@ -1530,7 +1579,7 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         for raw_planned in planned_by_entry.get(date_value, []):
             if regime.action == "skip":
                 break
-            if len(open_positions) >= args.max_positions:
+            if len(open_positions) >= max_positions_for_day:
                 break
             if any(position.planned.ticker == raw_planned.ticker for position in open_positions):
                 continue
@@ -1570,19 +1619,24 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
                     "dynamic_max_close_position_20d_pct": overrides.get("max_close_position_20d_pct", getattr(args, "max_close_position_20d_pct", 100.0)),
                 },
             )
-            slots = max(1, args.max_positions - len(open_positions))
+            slots = max(1, max_positions_for_day - len(open_positions))
             capital = cash / slots
             if regime.action == "reduce":
                 capital *= max(0.0, min(1.0, args.regime_risk_factor))
             if capital <= 0:
                 continue
-            capital *= market_capital_factor(str(temperature["state"]), args)
+            capital *= effective_market_capital_factor(str(temperature["state"]), aggressive_active, args)
+            capital *= dd_capital_factor
             if capital <= 0:
+                if dd_governor_active:
+                    drawdown_governor_hits += 1
                 continue
             shares, total_cost, buy_fee = max_affordable_lot_shares(capital, planned.entry_price, args)
             if shares <= 0:
                 skipped_no_lot += 1
                 continue
+            if dd_governor_active:
+                drawdown_governor_hits += 1
             cash -= total_cost
             open_positions.append(
                 OpenPosition(
@@ -1595,7 +1649,9 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
                 )
             )
             equity = marked_equity(cash, open_positions, bar_maps, date_value, args)
-            append_ledger_row(ledger, period, date_value, "BUY", planned, shares, planned.entry_price, buy_fee, cash, equity, f"score={planned.score:.1f}; market={temperature['state']}")
+            dd_note = f"; dd_factor={dd_capital_factor:.2f}; dd={dd_fraction:.2%}" if dd_governor_active else ""
+            aggressive_note = f"; cushion_mode=aggressive; cushion_return={cushion_return:.2%}" if aggressive_active else ""
+            append_ledger_row(ledger, period, date_value, "BUY", planned, shares, planned.entry_price, buy_fee, cash, equity, f"score={planned.score:.1f}; market={temperature['state']}{dd_note}{aggressive_note}")
 
         still_open: list[OpenPosition] = []
         for position in open_positions:
@@ -1717,6 +1773,15 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "hot_capital_factor": args.hot_capital_factor,
         "normal_capital_factor": args.normal_capital_factor,
         "cold_capital_factor": args.cold_capital_factor,
+        "equity_drawdown_capital_threshold": args.equity_drawdown_capital_threshold,
+        "equity_drawdown_capital_factor": args.equity_drawdown_capital_factor,
+        "drawdown_governor_hits": drawdown_governor_hits,
+        "profit_cushion_aggressive_threshold": args.profit_cushion_aggressive_threshold,
+        "profit_cushion_min_trading_days": args.profit_cushion_min_trading_days,
+        "profit_cushion_max_positions": args.profit_cushion_max_positions,
+        "profit_cushion_normal_capital_factor": args.profit_cushion_normal_capital_factor,
+        "profit_cushion_cold_capital_factor": args.profit_cushion_cold_capital_factor,
+        "profit_cushion_aggressive_days": profit_cushion_aggressive_days,
         "partial_take_profit": args.partial_take_profit,
         "first_manage_ratio": args.first_manage_ratio,
         "first_manage_min": args.first_manage_min,
@@ -1842,6 +1907,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hot-capital-factor", type=float, default=0.0)
     parser.add_argument("--normal-capital-factor", type=float, default=1.0)
     parser.add_argument("--cold-capital-factor", type=float, default=1.0)
+    parser.add_argument("--equity-drawdown-capital-threshold", type=float, default=0.0, help="disabled at 0; reduce new-entry capital when current equity drawdown reaches this fraction")
+    parser.add_argument("--equity-drawdown-capital-factor", type=float, default=1.0, help="capital multiplier for new entries while the equity drawdown governor is active")
+    parser.add_argument("--profit-cushion-aggressive-threshold", type=float, default=0.08, help="disabled at 0; enable aggressive sizing after current equity return reaches this fraction")
+    parser.add_argument("--profit-cushion-min-trading-days", type=int, default=120, help="minimum elapsed trading days before profit-cushion aggressive mode can activate")
+    parser.add_argument("--profit-cushion-max-positions", type=int, default=2, help="max positions while profit-cushion aggressive mode is active; 0 keeps the base max")
+    parser.add_argument("--profit-cushion-normal-capital-factor", type=float, default=0.70, help="normal-market capital factor in profit-cushion aggressive mode; negative keeps the base factor")
+    parser.add_argument("--profit-cushion-cold-capital-factor", type=float, default=0.70, help="cold/narrow capital factor in profit-cushion aggressive mode; negative keeps the base factor")
     parser.add_argument("--hot-min-score", type=float, default=90.0)
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
     parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.5)
