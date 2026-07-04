@@ -14,6 +14,7 @@ import csv
 import datetime as dt
 import json
 import math
+import re
 import textwrap
 import time
 from dataclasses import asdict, dataclass
@@ -133,6 +134,115 @@ def event_score_by_symbol(path: Path) -> dict[str, int]:
         ticker = str(event.get("ticker", ""))
         scores[ticker] = max(scores.get(ticker, 0), int(event.get("raw_score") or 0))
     return scores
+
+
+OFFICIAL_EVENT_SOURCES = {"CNINFO", "SEC", "SSE", "SZSE", "IR_HTML", "RSS"}
+OFFICIAL_POSITIVE_KEYWORDS = (
+    "业绩预增",
+    "业绩快报",
+    "净利润增长",
+    "扭亏",
+    "中标",
+    "订单",
+    "合同",
+    "回购",
+    "增持",
+    "指数纳入",
+    "纳入指数",
+    "监管明确利好",
+    "approved",
+    "buyback",
+    "repurchase",
+    "contract",
+    "order",
+    "award",
+    "guidance",
+)
+OFFICIAL_NEGATIVE_KEYWORDS = (
+    "减持",
+    "问询函",
+    "监管问询",
+    "立案",
+    "处罚",
+    "行政处罚",
+    "业绩预亏",
+    "亏损",
+    "解禁",
+    "退市风险",
+    "st风险",
+    "investigation",
+    "penalty",
+    "inquiry",
+    "loss",
+    "lock-up",
+)
+
+
+def _keyword_hit(text: str, keywords: tuple[str, ...]) -> bool:
+    text_lower = text.lower()
+    return any(keyword.lower() in text_lower for keyword in keywords)
+
+
+def _official_source(source: str, url: str) -> bool:
+    source_upper = source.upper()
+    if source_upper in {"XUEQIU", "SEC_ERROR", "CNINFO_ERROR"}:
+        return False
+    if source_upper in OFFICIAL_EVENT_SOURCES:
+        return True
+    return bool(re.search(r"(cninfo|sse|szse|sec\.gov|investor|ir\.)", url, re.IGNORECASE))
+
+
+def official_event_score_by_symbol(path: Path) -> dict[str, int]:
+    """Signed low-noise event score from official/company/regulatory sources only."""
+    if not path.exists():
+        return {}
+    try:
+        events = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    scores: dict[str, int] = {}
+    for event in events:
+        ticker = str(event.get("ticker", "")).strip()
+        if not ticker:
+            continue
+        source = str(event.get("source", "")).strip()
+        url = str(event.get("url", "")).strip()
+        if not _official_source(source, url):
+            continue
+        text = f"{event.get('title', '')} {event.get('snippet', '')}"
+        risk_flags = [str(item) for item in (event.get("risk_flags") or [])]
+        raw = max(0, min(100, int(event.get("raw_score") or 0)))
+        has_negative = bool(risk_flags) or _keyword_hit(text, OFFICIAL_NEGATIVE_KEYWORDS)
+        has_positive = _keyword_hit(text, OFFICIAL_POSITIVE_KEYWORDS)
+        if has_negative:
+            signed = -max(raw, 55)
+        elif has_positive:
+            signed = max(raw, 60)
+        else:
+            continue
+        current = scores.get(ticker, 0)
+        if signed < 0:
+            if current >= 0 or abs(signed) > abs(current):
+                scores[ticker] = signed
+        elif current >= 0:
+            scores[ticker] = max(current, signed)
+    return scores
+
+
+def official_event_score_adjustment(event_score: int) -> float:
+    if event_score >= 85:
+        return 4.0
+    if event_score >= 65:
+        return 2.5
+    if event_score >= 45:
+        return 1.0
+    if event_score <= -85:
+        return -6.0
+    if event_score <= -65:
+        return -4.0
+    if event_score <= -45:
+        return -2.0
+    return 0.0
 
 
 def simulate_exit(

@@ -97,6 +97,8 @@ def run_scan(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path]:
         "26",
         "--max-close-position-20d-pct",
         "85",
+        "--normal-min-atr-pct",
+        "4.1",
         "--cold-max-gap-up",
         "0.01",
         "--cold-gap-volume-min-ratio",

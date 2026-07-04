@@ -57,6 +57,8 @@ MONITOR_DEFAULT_ARGS = [
     "85",
     "--normal-min-score",
     "87",
+    "--normal-min-atr-pct",
+    "4.1",
     "--narrow-rally-min-score",
     "83",
     "--narrow-rally-max-gap-up",
@@ -94,9 +96,13 @@ class BuyAdvice:
     trigger_price: float
     vwap: float
     target_price: float
+    first_manage_price: float
     hard_stop_price: float
     target_pct: float
+    first_manage_pct: float
     hard_stop_pct: float
+    target_upper_hit_rate_pct: float
+    first_manage_hit_rate_pct: float
     edge_score: float
     reason: str
     buy_enabled: bool = True
@@ -157,14 +163,16 @@ def parse_float(value: object, default: float = 0.0) -> float:
         return default
 
 
-def target_context_note(ref_price: float, target_pct: float, buy_enabled: bool) -> str:
-    if ref_price <= 0 or target_pct <= 0:
+def first_manage_pct_from_target(target_pct: float) -> float:
+    return max(4.0, target_pct * 0.4)
+
+
+def target_context_note(first_manage_price: float, target_hit_rate: float, first_manage_hit_rate: float, buy_enabled: bool) -> str:
+    if first_manage_price <= 0:
         return ""
-    first_manage_pct = max(4.0, target_pct * 0.4)
-    first_manage_price = ref_price * (1 + first_manage_pct / 100)
     if not buy_enabled:
         return "；观察池不按目标价交易"
-    return f"；目标价是上沿，先看{first_manage_price:.2f}管理线"
+    return f"；目标价是上沿，先看{first_manage_price:.2f}管理线；12M样本 上沿{target_hit_rate:.1f}%/管理线{first_manage_hit_rate:.1f}%"
 
 
 def phase_for_time(now: dt.datetime) -> str:
@@ -334,6 +342,10 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         stop_pct = parse_float(row.get("hard_stop_pct"))
         ref_price = latest if latest > 0 else close
         target_price = ref_price * (1 + target_pct / 100) if ref_price else 0.0
+        first_manage_pct = parse_float(row.get("first_manage_pct"), first_manage_pct_from_target(target_pct))
+        first_manage_price = ref_price * (1 + first_manage_pct / 100) if ref_price else 0.0
+        target_upper_hit_rate = parse_float(row.get("target_upper_hit_rate_pct"), 3.54)
+        first_manage_hit_rate = parse_float(row.get("first_manage_hit_rate_pct"), 35.4)
         hard_stop_price = ref_price * (1 - stop_pct / 100) if ref_price else 0.0
         if action == "DATA_UNAVAILABLE":
             priority = 9
@@ -343,6 +355,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
             trigger = 0.0
             vwap = 0.0
             target_price = 0.0
+            first_manage_price = 0.0
             hard_stop_price = 0.0
             reason = "盘中5分钟行情不可用，暂停买入判断"
         elif action == "QUOTE_ONLY":
@@ -376,7 +389,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
             final_action = "NO_BUY"
             buy_enabled = False
             reason = row.get("risks", "") or action or "未通过盘中执行过滤"
-        reason = f"{reason}{target_context_note(ref_price, target_pct, buy_enabled)}"
+        reason = f"{reason}{target_context_note(first_manage_price, target_upper_hit_rate, first_manage_hit_rate, buy_enabled)}"
         advices.append(
             BuyAdvice(
                 ticker=row.get("ticker", ""),
@@ -387,9 +400,13 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
                 trigger_price=round(trigger, 4),
                 vwap=round(vwap, 4),
                 target_price=round(target_price, 4),
+                first_manage_price=round(first_manage_price, 4),
                 hard_stop_price=round(hard_stop_price, 4),
                 target_pct=target_pct,
+                first_manage_pct=first_manage_pct,
                 hard_stop_pct=stop_pct,
+                target_upper_hit_rate_pct=target_upper_hit_rate,
+                first_manage_hit_rate_pct=first_manage_hit_rate,
                 edge_score=parse_float(row.get("edge_score")),
                 reason=reason,
                 buy_enabled=buy_enabled,
@@ -464,7 +481,7 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                 reason = f"跌破硬止损 {hard_stop_price:.2f}"
             elif target_price > 0 and latest >= target_price:
                 action = "TAKE_PROFIT"
-                reason = f"达到目标价 {target_price:.2f}"
+                reason = f"达到目标上沿 {target_price:.2f}"
             elif highest > buy_price and latest <= highest * (1 - trailing_stop_pct / 100):
                 action = "TRAIL_SELL"
                 reason = f"从日内/持仓高点 {highest:.2f} 回落超过 {trailing_stop_pct:.1f}%"
@@ -531,12 +548,12 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
             "",
             "## 再看买入",
             "",
-            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 目标上沿 | 止损价 | Edge | 理由 |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 目标上沿 | 第一管理线 | 止损价 | 历史命中 | Edge | 理由 |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for item in buy_advices[:20]:
-        lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.latest_price:.2f} | {item.trigger_price:.2f} | {item.vwap:.2f} | {item.target_price:.2f} | {item.hard_stop_price:.2f} | {item.edge_score:.2f} | {item.reason} |")
+        lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.latest_price:.2f} | {item.trigger_price:.2f} | {item.vwap:.2f} | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.hard_stop_price:.2f} | {item.first_manage_hit_rate_pct:.1f}% | {item.edge_score:.2f} | {item.reason} |")
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
@@ -552,13 +569,13 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "target_price", "hard_stop_price", "pnl_pct", "reason"]
+        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "target_price", "first_manage_price", "hard_stop_price", "target_upper_hit_rate_pct", "first_manage_hit_rate_pct", "pnl_pct", "reason"]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for item in sell_advices:
-            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "hard_stop_price": item.hard_stop_price, "pnl_pct": item.pnl_pct, "reason": item.reason})
+            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": "", "hard_stop_price": item.hard_stop_price, "target_upper_hit_rate_pct": "", "first_manage_hit_rate_pct": "", "pnl_pct": item.pnl_pct, "reason": item.reason})
         for item in buy_advices:
-            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "hard_stop_price": item.hard_stop_price, "pnl_pct": "", "reason": item.reason})
+            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "hard_stop_price": item.hard_stop_price, "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "pnl_pct": "", "reason": item.reason})
 
     shutil.copyfile(report, out_dir / "latest_plan.md")
     shutil.copyfile(json_path, out_dir / "latest_plan.json")

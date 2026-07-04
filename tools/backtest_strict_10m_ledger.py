@@ -22,6 +22,7 @@ import requests
 
 from baostock_intraday import BaoStock5mClient, IntradayBar
 from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols
+from short_term_pattern_miner import official_event_score_adjustment, official_event_score_by_symbol
 from short_term_strategy_backtest import (
     PlannedTrade,
     build_bar_maps,
@@ -50,8 +51,12 @@ from tools.backtest_existing_strategy_ledger import (
 class OpenPosition:
     planned: PlannedTrade
     shares: int
+    remaining_shares: int
     cost_basis: float
+    remaining_cost_basis: float
     buy_fee: float
+    first_manage_done: bool = False
+    realized_partial_pnl: float = 0.0
 
 
 def parse_clock(raw: str) -> dt.time:
@@ -237,6 +242,177 @@ def market_capital_factor(state: str, args: argparse.Namespace) -> float:
     return max(0.0, min(1.0, float(args.normal_capital_factor)))
 
 
+def first_manage_pct(planned: PlannedTrade, args: argparse.Namespace) -> float:
+    return max(float(args.first_manage_min), planned.target_pct * float(args.first_manage_ratio))
+
+
+def partial_sell_ratio_for_state(state: str, args: argparse.Namespace) -> float:
+    if state == "cold":
+        return max(0.0, min(1.0, float(args.partial_sell_ratio_cold)))
+    if state == "narrow_rally":
+        return max(0.0, min(1.0, float(args.partial_sell_ratio_narrow_rally)))
+    return max(0.0, min(1.0, float(args.partial_sell_ratio_normal)))
+
+
+def partial_sell_shares(remaining_shares: int, ratio: float, args: argparse.Namespace) -> int:
+    lot_size = max(1, int(args.lot_size))
+    if remaining_shares < lot_size * 2 or ratio <= 0:
+        return 0
+    lots = int((remaining_shares * ratio) // lot_size)
+    if lots <= 0:
+        lots = 1
+    lots = min(lots, remaining_shares // lot_size - 1)
+    return max(0, lots * lot_size)
+
+
+def passes_market_quality(planned: PlannedTrade, state: str, args: argparse.Namespace) -> bool:
+    features = planned.features
+    if state == "cold":
+        if float(features.get("traded_value_ratio") or 0.0) < float(args.cold_min_traded_value_ratio):
+            return False
+        if float(features.get("momentum_10d_pct") or 0.0) < float(args.cold_min_momentum_10d_pct):
+            return False
+        if float(features.get("sector_momentum_5d_pct") or 0.0) < float(args.cold_min_sector_momentum_5d_pct):
+            return False
+    if state == "normal":
+        if float(features.get("max_5d_range_pct") or 0.0) < float(args.normal_min_5d_range_pct):
+            return False
+        if float(features.get("atr_pct") or 0.0) < float(args.normal_min_atr_pct):
+            return False
+    return True
+
+
+def apply_official_event_adjustments(rows: list[Any], event_scores: dict[str, int]) -> None:
+    if not event_scores:
+        return
+    for row in rows:
+        adjustment = official_event_score_adjustment(int(event_scores.get(row.ticker, 0)))
+        if adjustment:
+            row.score = round(max(0.0, min(100.0, float(row.score) + adjustment)), 2)
+
+
+RETURN_BUCKETS = (
+    (float("-inf"), -2.0, "<-2%"),
+    (-2.0, 0.0, "-2~0%"),
+    (0.0, 2.0, "0~2%"),
+    (2.0, 4.0, "2~4%"),
+    (4.0, 7.2, "4~7.2%"),
+    (7.2, float("inf"), ">7.2%"),
+)
+
+
+def return_bucket(value: float) -> str:
+    for low, high, label in RETURN_BUCKETS:
+        if low <= value < high:
+            return label
+    return ">7.2%"
+
+
+def truthy(value: object) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def safe_float(value: object) -> float:
+    try:
+        if value in {None, ""}:
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def summarize_distribution_group(
+    period: str,
+    group_type: str,
+    group_value: str,
+    sells: list[dict[str, Any]],
+    partial_sells: list[dict[str, Any]],
+) -> dict[str, Any]:
+    returns = [safe_float(row.get("return_pct")) for row in sells]
+    trades = len(sells)
+    wins = sum(1 for value in returns if value > 0)
+    target_hits = sum(1 for row in sells if str(row.get("reason", "")).startswith("take_profit"))
+    first_manage_hits = sum(1 for row in sells if truthy(row.get("first_manage_hit")))
+    partial_pnl = sum(safe_float(row.get("realized_pnl")) for row in partial_sells)
+    remaining_pnl = sum(safe_float(row.get("realized_pnl")) for row in sells)
+    return {
+        "period": period,
+        "group_type": group_type,
+        "group_value": group_value,
+        "closed_trades": trades,
+        "win_rate_pct": round(wins / trades * 100, 4) if trades else 0.0,
+        "avg_return_pct": round(sum(returns) / trades, 4) if trades else 0.0,
+        "target_upper_hits": target_hits,
+        "target_upper_hit_rate_pct": round(target_hits / trades * 100, 4) if trades else 0.0,
+        "first_manage_hits": first_manage_hits,
+        "first_manage_hit_rate_pct": round(first_manage_hits / trades * 100, 4) if trades else 0.0,
+        "partial_sells": len(partial_sells),
+        "partial_realized_pnl": round(partial_pnl, 2),
+        "remaining_realized_pnl": round(remaining_pnl, 2),
+        "total_realized_pnl": round(partial_pnl + remaining_pnl, 2),
+    }
+
+
+def period_sort_key(period: str) -> int:
+    try:
+        return int(str(period).rstrip("M"))
+    except ValueError:
+        return 999
+
+
+def build_distribution_rows(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sells = [row for row in ledger if row.get("action") == "SELL"]
+    partial_sells = [row for row in ledger if row.get("action") == "PARTIAL_SELL"]
+    periods = sorted({str(row.get("period", "")) for row in sells}, key=period_sort_key)
+    rows: list[dict[str, Any]] = []
+    for period in periods:
+        period_sells = [row for row in sells if row.get("period") == period]
+        period_partials = [row for row in partial_sells if row.get("period") == period]
+        rows.append(summarize_distribution_group(period, "overall", "all", period_sells, period_partials))
+        for field, group_type in (
+            ("market_state", "market_state"),
+            ("reason", "exit_reason"),
+        ):
+            for value in sorted({str(row.get(field, "") or "unknown") for row in period_sells}):
+                group_sells = [row for row in period_sells if str(row.get(field, "") or "unknown") == value]
+                group_partials = [row for row in period_partials if str(row.get(field, "") or "unknown") == value]
+                rows.append(summarize_distribution_group(period, group_type, value, group_sells, group_partials))
+        for month in sorted({str(row.get("date", ""))[:7] for row in period_sells}):
+            group_sells = [row for row in period_sells if str(row.get("date", ""))[:7] == month]
+            group_partials = [row for row in period_partials if str(row.get("date", ""))[:7] == month]
+            rows.append(summarize_distribution_group(period, "month", month, group_sells, group_partials))
+        for bucket in [item[2] for item in RETURN_BUCKETS]:
+            group_sells = [row for row in period_sells if return_bucket(safe_float(row.get("return_pct"))) == bucket]
+            rows.append(summarize_distribution_group(period, "return_bucket", bucket, group_sells, []))
+    return rows
+
+
+def write_distribution_outputs(out_dir: Path, prefix: str, ledger: list[dict[str, Any]]) -> dict[str, Path]:
+    rows = build_distribution_rows(ledger)
+    csv_path = out_dir / f"{prefix}_distribution.csv"
+    md_path = out_dir / f"{prefix}_distribution.md"
+    fieldnames = list(rows[0].keys()) if rows else []
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if rows:
+            writer.writeheader()
+            writer.writerows(rows)
+    lines = [
+        f"# Strict 10m Distribution - {prefix}",
+        "",
+        "| Period | Group | Value | Trades | Win% | Avg Return% | Target Hit% | First Manage Hit% | Partial PnL | Remaining PnL |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        if row["group_type"] not in {"overall", "market_state"}:
+            continue
+        lines.append(
+            f"| {row['period']} | {row['group_type']} | {row['group_value']} | {row['closed_trades']} | {row['win_rate_pct']:.2f} | {row['avg_return_pct']:.2f} | {row['target_upper_hit_rate_pct']:.2f} | {row['first_manage_hit_rate_pct']:.2f} | {row['partial_realized_pnl']:.2f} | {row['remaining_realized_pnl']:.2f} |"
+        )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"distribution_csv": csv_path, "distribution_md": md_path}
+
+
 def write_daily_cache(cache_dir: Path, ticker: str, fetch_start: dt.date, fetch_end: dt.date, bars: list[PriceBar]) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{ticker}_{fetch_start:%Y%m%d}_{fetch_end:%Y%m%d}.json"
@@ -371,6 +547,9 @@ def refine_trade_strict_10m(
     best_high = entry_price
     below_vwap_count = 0
     limit_down_blocked_exits = 0
+    first_manage_bar: IntradayBar | None = None
+    first_manage_price = 0.0
+    first_manage_target_pct = first_manage_pct(planned, args)
     for bar in bars:
         if bar.moment <= entry_bar.moment:
             continue
@@ -390,6 +569,9 @@ def refine_trade_strict_10m(
             exit_price = sell_execution_price(raw_stop_price, args)
             exit_reason = "hard_stop_10m"
             break
+        if first_manage_bar is None and bar.high >= entry_price * (1 + first_manage_target_pct):
+            first_manage_bar = bar
+            first_manage_price = sell_execution_price(entry_price * (1 + first_manage_target_pct), args)
         if bar.high >= entry_price * (1 + planned.target_pct):
             exit_bar = bar
             exit_price = sell_execution_price(entry_price * (1 + planned.target_pct), args)
@@ -425,6 +607,11 @@ def refine_trade_strict_10m(
             "exit_time": exit_bar.time.isoformat(timespec="minutes"),
             "entry_vwap": round(entry_vwap, 4),
             "entry_gap_pct": round(gap_pct * 100, 4),
+            "first_manage_pct": round(first_manage_target_pct * 100, 4),
+            "first_manage_hit": bool(first_manage_bar),
+            "first_manage_time": first_manage_bar.time.isoformat(timespec="minutes") if first_manage_bar else "",
+            "first_manage_date": first_manage_bar.date.isoformat() if first_manage_bar else "",
+            "first_manage_price": round(first_manage_price, 4) if first_manage_price else "",
             "execution_interval_minutes": 10,
             "slippage_bps": args.slippage_bps,
             "limit_threshold_pct": round(limit_threshold * 100, 4),
@@ -503,7 +690,7 @@ def marked_equity(cash: float, open_positions: list[OpenPosition], bar_maps: dic
         planned = position.planned
         bar = bar_maps.get(planned.ticker, {}).get(date_value)
         mark_price = bar.close if bar else planned.entry_price
-        amount = position.shares * mark_price
+        amount = position.remaining_shares * mark_price
         total += amount - trade_fee(amount, "SELL", args)
     return total
 
@@ -531,7 +718,7 @@ def append_ledger_row(
         {
             "period": period,
             "date": date_value.isoformat(),
-            "time": planned.features.get("entry_time" if action == "BUY" else "exit_time", ""),
+            "time": planned.features.get("entry_time" if action == "BUY" else "first_manage_time" if action == "PARTIAL_SELL" else "exit_time", ""),
             "action": action,
             "ticker": planned.ticker,
             "name": planned.name,
@@ -542,8 +729,8 @@ def append_ledger_row(
             "cash_after": round(cash, 2),
             "total_equity_after": round(equity, 2),
             "realized_pnl": round(realized_pnl, 2),
-            "return_pct": round(planned.return_pct, 4) if action == "SELL" else "",
-            "reason": planned.exit_reason if action == "SELL" else planned.setup_type,
+            "return_pct": round(planned.return_pct, 4) if action in {"SELL", "PARTIAL_SELL"} else "",
+            "reason": planned.exit_reason if action == "SELL" else "first_manage_take_profit_10m" if action == "PARTIAL_SELL" else planned.setup_type,
             "note": note,
             "market_state": features.get("market_state", ""),
             "score": round(planned.score, 4),
@@ -553,6 +740,15 @@ def append_ledger_row(
             "entry_gap_pct": features.get("entry_gap_pct", ""),
             "entry_vwap": features.get("entry_vwap", ""),
             "entry_vwap_distance_pct": round(entry_vwap_distance_pct, 4),
+            "first_manage_pct": features.get("first_manage_pct", ""),
+            "first_manage_hit": features.get("first_manage_hit", ""),
+            "first_manage_time": features.get("first_manage_time", ""),
+            "first_manage_date": features.get("first_manage_date", ""),
+            "first_manage_price": features.get("first_manage_price", ""),
+            "partial_sell_ratio": features.get("partial_sell_ratio", ""),
+            "partial_realized_pnl": features.get("partial_realized_pnl", ""),
+            "remaining_realized_pnl": features.get("remaining_realized_pnl", ""),
+            "trade_total_realized_pnl": features.get("trade_total_realized_pnl", ""),
             "traded_value_ratio": features.get("traded_value_ratio", ""),
             "atr_pct": features.get("atr_pct", ""),
             "max_5d_range_pct": features.get("max_5d_range_pct", ""),
@@ -617,6 +813,9 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
                 continue
             if not planned_passes_dynamic_filters(raw_planned, overrides):
                 continue
+            if not passes_market_quality(raw_planned, str(temperature["state"]), args):
+                skipped_candidates += 1
+                continue
             planned = refine_trade_strict_10m(raw_planned, price_map.get(raw_planned.ticker, []), intraday_map.get(raw_planned.ticker, []), end_date, args)
             if not planned:
                 skipped_candidates += 1
@@ -661,26 +860,88 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
                 skipped_no_lot += 1
                 continue
             cash -= total_cost
-            open_positions.append(OpenPosition(planned=planned, shares=shares, cost_basis=total_cost, buy_fee=buy_fee))
+            open_positions.append(
+                OpenPosition(
+                    planned=planned,
+                    shares=shares,
+                    remaining_shares=shares,
+                    cost_basis=total_cost,
+                    remaining_cost_basis=total_cost,
+                    buy_fee=buy_fee,
+                )
+            )
             equity = marked_equity(cash, open_positions, bar_maps, date_value, args)
             append_ledger_row(ledger, period, date_value, "BUY", planned, shares, planned.entry_price, buy_fee, cash, equity, f"score={planned.score:.1f}; market={temperature['state']}")
 
         still_open: list[OpenPosition] = []
         for position in open_positions:
             planned = position.planned
+            current_position = position
+            first_manage_date = parse_date(str(planned.features.get("first_manage_date") or ""))
+            first_manage_price = float(planned.features.get("first_manage_price") or 0.0)
+            if (
+                args.partial_take_profit
+                and not current_position.first_manage_done
+                and first_manage_date is not None
+                and first_manage_date <= date_value
+                and first_manage_price > 0
+            ):
+                market_state = str(planned.features.get("market_state") or "")
+                partial_ratio = partial_sell_ratio_for_state(market_state, args)
+                sell_shares = partial_sell_shares(current_position.remaining_shares, partial_ratio, args)
+                if sell_shares > 0:
+                    amount = sell_shares * first_manage_price
+                    sell_fee = trade_fee(amount, "SELL", args)
+                    proceeds = amount - sell_fee
+                    partial_cost = current_position.remaining_cost_basis * sell_shares / current_position.remaining_shares
+                    pnl = proceeds - partial_cost
+                    cash += proceeds
+                    partial_return_pct = pnl / partial_cost * 100 if partial_cost else 0.0
+                    features = {
+                        **planned.features,
+                        "partial_sell_ratio": round(partial_ratio, 4),
+                        "partial_realized_pnl": round(pnl, 2),
+                    }
+                    partial_planned = replace(
+                        planned,
+                        return_pct=partial_return_pct,
+                        exit_reason="first_manage_take_profit_10m",
+                        features=features,
+                    )
+                    current_position = replace(
+                        current_position,
+                        planned=replace(planned, features=features),
+                        remaining_shares=current_position.remaining_shares - sell_shares,
+                        remaining_cost_basis=current_position.remaining_cost_basis - partial_cost,
+                        first_manage_done=True,
+                        realized_partial_pnl=current_position.realized_partial_pnl + pnl,
+                    )
+                    equity = marked_equity(cash, [*still_open, current_position], bar_maps, date_value, args)
+                    append_ledger_row(ledger, period, date_value, "PARTIAL_SELL", partial_planned, sell_shares, first_manage_price, sell_fee, cash, equity, f"ratio={partial_ratio:.2f}", pnl)
+                    planned = current_position.planned
             if planned.exit_date <= date_value:
-                amount = position.shares * planned.exit_price
+                amount = current_position.remaining_shares * planned.exit_price
                 sell_fee = trade_fee(amount, "SELL", args)
                 proceeds = amount - sell_fee
                 cash += proceeds
-                pnl = proceeds - position.cost_basis
-                net_return_pct = pnl / position.cost_basis * 100 if position.cost_basis else 0.0
+                remaining_pnl = proceeds - current_position.remaining_cost_basis
+                total_pnl = current_position.realized_partial_pnl + remaining_pnl
+                net_return_pct = total_pnl / current_position.cost_basis * 100 if current_position.cost_basis else 0.0
                 closed_returns.append(net_return_pct)
-                closed_pnls.append(pnl)
+                closed_pnls.append(total_pnl)
+                sell_planned = replace(
+                    planned,
+                    return_pct=net_return_pct,
+                    features={
+                        **planned.features,
+                        "remaining_realized_pnl": round(remaining_pnl, 2),
+                        "trade_total_realized_pnl": round(total_pnl, 2),
+                    },
+                )
                 equity = marked_equity(cash, still_open, bar_maps, date_value, args)
-                append_ledger_row(ledger, period, date_value, "SELL", replace(planned, return_pct=net_return_pct), position.shares, planned.exit_price, sell_fee, cash, equity, "", pnl)
+                append_ledger_row(ledger, period, date_value, "SELL", sell_planned, current_position.remaining_shares, planned.exit_price, sell_fee, cash, equity, "", remaining_pnl)
             else:
-                still_open.append(position)
+                still_open.append(current_position)
         open_positions = still_open
 
         equity = marked_equity(cash, open_positions, bar_maps, date_value, args)
@@ -701,6 +962,9 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
     closed = len(closed_returns)
     gross_profit = sum(value for value in closed_pnls if value > 0)
     gross_loss = -sum(value for value in closed_pnls if value < 0)
+    partial_rows = [row for row in ledger if row.get("action") == "PARTIAL_SELL"]
+    partial_pnl = sum(float(row.get("realized_pnl") or 0.0) for row in partial_rows)
+    remaining_pnl = sum(float(row.get("realized_pnl") or 0.0) for row in ledger if row.get("action") == "SELL")
     summary = {
         "period": period,
         "start_date": trading_dates[0].isoformat() if trading_dates else start_date.isoformat(),
@@ -713,6 +977,9 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "closed_trades": closed,
         "win_rate_pct": round(wins / closed * 100, 4) if closed else 0.0,
         "open_positions_end": len(open_positions),
+        "partial_sells": len(partial_rows),
+        "partial_realized_pnl": round(partial_pnl, 2),
+        "remaining_realized_pnl": round(remaining_pnl, 2),
         "skipped_after_intraday_filters": skipped_candidates,
         "skipped_no_lot": skipped_no_lot,
         "interval_minutes": 10,
@@ -726,10 +993,21 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "hot_capital_factor": args.hot_capital_factor,
         "normal_capital_factor": args.normal_capital_factor,
         "cold_capital_factor": args.cold_capital_factor,
+        "partial_take_profit": args.partial_take_profit,
+        "first_manage_ratio": args.first_manage_ratio,
+        "first_manage_min": args.first_manage_min,
+        "partial_sell_ratio_normal": args.partial_sell_ratio_normal,
+        "partial_sell_ratio_cold": args.partial_sell_ratio_cold,
+        "partial_sell_ratio_narrow_rally": args.partial_sell_ratio_narrow_rally,
+        "cold_min_traded_value_ratio": args.cold_min_traded_value_ratio,
+        "cold_min_momentum_10d_pct": args.cold_min_momentum_10d_pct,
+        "cold_min_sector_momentum_5d_pct": args.cold_min_sector_momentum_5d_pct,
+        "normal_min_5d_range_pct": args.normal_min_5d_range_pct,
+        "normal_min_atr_pct": args.normal_min_atr_pct,
         "avg_trade_return_pct": round(sum(closed_returns) / closed, 4) if closed else 0.0,
         "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss else 0.0,
-        "event_file": "disabled",
-        "event_weight": 0,
+        "event_file": args.events or "disabled",
+        "event_weight": "official_score_adjustment" if args.events else 0,
     }
     return ledger, daily, summary
 
@@ -738,6 +1016,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Strict 10-minute execution backtest ledger.")
     parser.add_argument("--watchlist", default="config/watchlist.mainboard_liquid.csv")
     parser.add_argument("--allowed-prefixes", default=",".join(DEFAULT_BUYABLE_PREFIXES))
+    parser.add_argument("--events", default="", help="official event score JSON; disabled by default")
     parser.add_argument("--end-date", default=default_end_date().isoformat())
     parser.add_argument("--period-months", default="1,3,6")
     parser.add_argument("--initial-cash", type=float, default=100000.0)
@@ -760,6 +1039,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trail-atr-mult", type=float, default=0.25)
     parser.add_argument("--trail-min", type=float, default=0.025)
     parser.add_argument("--trail-max", type=float, default=0.06)
+    parser.add_argument("--partial-take-profit", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--first-manage-ratio", type=float, default=0.4)
+    parser.add_argument("--first-manage-min", type=float, default=0.04)
+    parser.add_argument("--partial-sell-ratio-normal", type=float, default=0.4)
+    parser.add_argument("--partial-sell-ratio-cold", type=float, default=0.5)
+    parser.add_argument("--partial-sell-ratio-narrow-rally", type=float, default=0.3)
+    parser.add_argument("--cold-min-traded-value-ratio", type=float, default=0.0)
+    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=-999.0)
+    parser.add_argument("--cold-min-sector-momentum-5d-pct", type=float, default=-999.0)
+    parser.add_argument("--normal-min-5d-range-pct", type=float, default=0.0)
+    parser.add_argument("--normal-min-atr-pct", type=float, default=4.1)
     parser.add_argument("--fee-bps", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument("--commission-bps", type=float, default=3.0)
     parser.add_argument("--min-commission", type=float, default=5.0)
@@ -855,6 +1145,9 @@ def main() -> int:
     symbols = filter_symbols(load_watchlist(Path(args.watchlist)), args.allowed_prefixes)
     session = requests.Session()
     session.headers.update(DEFAULT_HEADERS)
+    event_scores = official_event_score_by_symbol(Path(args.events)) if args.events else {}
+    if args.events:
+        print(f"official event scores={len(event_scores)} source={args.events}", flush=True)
     price_map: dict[str, list[PriceBar]] = {}
     daily_cache_dir = Path(args.daily_cache_dir)
     baostock_daily_client: BaoStockDailyClient | None = None
@@ -886,7 +1179,8 @@ def main() -> int:
     period_planned: dict[int, dict[dt.date, list[PlannedTrade]]] = {}
     for months in periods:
         start_date = subtract_months(end_date, months)
-        rows = build_signal_rows(symbols, price_map, start_date, end_date, args.horizon, {}, args.min_traded_value, args.take_profit, args.hard_stop, args.trailing_stop)
+        rows = build_signal_rows(symbols, price_map, start_date, end_date, args.horizon, event_scores, args.min_traded_value, args.take_profit, args.hard_stop, args.trailing_stop)
+        apply_official_event_adjustments(rows, event_scores)
         planned = build_planned_by_entry(rows, price_map, end_date, args)
         period_planned[months] = planned
         for date_value, items in planned.items():
@@ -912,6 +1206,7 @@ def main() -> int:
 
     prefix = f"strict_10m_no_events_{min(periods)}M_{max(periods)}M_to_{end_date:%Y%m%d}"
     outputs = write_outputs(Path(args.out_dir), prefix, all_ledger, all_daily, summaries)
+    outputs.update(write_distribution_outputs(Path(args.out_dir), prefix, all_ledger))
     for name, path in outputs.items():
         print(f"{name}={path}", flush=True)
     return 0

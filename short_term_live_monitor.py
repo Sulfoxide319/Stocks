@@ -24,10 +24,11 @@ from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols
 from short_term_pattern_miner import (
     PatternRow,
     atr_pct_at,
-    event_score_by_symbol,
     feature_score,
     max_range_pct_at,
     moving_average,
+    official_event_score_adjustment,
+    official_event_score_by_symbol,
     setup_type,
 )
 from short_term_strategy_backtest import infer_sector_group
@@ -53,6 +54,12 @@ class MonitorCandidate:
     target_pct: float
     hard_stop_pct: float
     trailing_stop_pct: float
+    first_manage_pct: float
+    first_manage_price: float
+    target_upper_hit_rate_pct: float
+    first_manage_hit_rate_pct: float
+    market_state: str
+    event_score: int
     ma5_distance_pct: float
     value_ratio: float
     momentum_3d_pct: float
@@ -153,7 +160,7 @@ def resolve_event_scores(events_arg: str, today: dt.date, max_event_age_days: in
     if age_days is not None and age_days > max_event_age_days:
         return EventScoreContext(path, {}, "stale_disabled", age_days, f"event_file_age={age_days}d")
 
-    scores = event_score_by_symbol(path)
+    scores = official_event_score_by_symbol(path)
     status = "ok" if scores else "empty"
     return EventScoreContext(path, scores, status, age_days)
 
@@ -164,6 +171,16 @@ def dynamic_exit_params(row: PatternRow, target_atr: float, target_range: float,
     stop = min(0.09, max(0.03, row.atr_pct / 100 * stop_atr))
     trail = min(0.06, max(0.025, row.atr_pct / 100 * trail_atr))
     return target, stop, trail
+
+
+def first_manage_pct_from_target(target_pct: float) -> float:
+    return max(0.04, target_pct * 0.4)
+
+
+def historical_hit_rates(market_state: str) -> tuple[float, float]:
+    if market_state == "narrow_rally":
+        return 0.0, 50.0
+    return 3.54, 35.4
 
 
 def signal_row_for_latest(
@@ -219,6 +236,7 @@ def signal_row_for_latest(
         event_score,
         min_traded_value,
     )
+    score = max(0.0, min(100.0, score + official_event_score_adjustment(event_score)))
     return PatternRow(
         ticker=symbol.ticker,
         name=symbol.name,
@@ -398,6 +416,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--normal-max-gap-up", type=float, default=0.02)
     parser.add_argument("--normal-gap-volume-min-ratio", type=float, default=1.3)
     parser.add_argument("--normal-max-5d-range-pct", type=float, default=32.0)
+    parser.add_argument("--normal-min-atr-pct", type=float, default=4.1)
     parser.add_argument("--normal-max-momentum-10d-pct", type=float, default=26.0)
     parser.add_argument("--normal-max-close-position-20d-pct", type=float, default=85.0)
     parser.add_argument("--narrow-rally-min-score", type=float, default=83.0)
@@ -534,6 +553,7 @@ def main() -> int:
     active_gap_volume_min_ratio = float(overrides.get("gap_volume_min_ratio", args.gap_volume_min_ratio))
     active_min_score = float(overrides.get("min_score", args.min_score))
     active_max_5d_range = float(overrides.get("max_5d_range_pct", args.max_5d_range_pct))
+    active_min_atr = float(args.normal_min_atr_pct) if str(temperature["state"]) == "normal" else 0.0
     active_max_momentum_10d = float(overrides.get("max_momentum_10d_pct", args.max_momentum_10d_pct))
     active_max_close_position = float(overrides.get("max_close_position_20d_pct", args.max_close_position_20d_pct))
 
@@ -542,6 +562,7 @@ def main() -> int:
         "universe": total_symbols,
         "no_signal_row": 0,
         "range_too_wide": 0,
+        "atr_too_low": 0,
         "momentum10_too_high": 0,
         "close_position_too_high": 0,
         "score_below_min": 0,
@@ -571,6 +592,9 @@ def main() -> int:
                 continue
             if active_max_5d_range > 0 and row.max_5d_range_pct > active_max_5d_range:
                 filter_counts["range_too_wide"] += 1
+                continue
+            if active_min_atr > 0 and row.atr_pct < active_min_atr:
+                filter_counts["atr_too_low"] += 1
                 continue
             if active_max_momentum_10d < 999 and row.momentum_10d_pct > active_max_momentum_10d:
                 filter_counts["momentum10_too_high"] += 1
@@ -614,6 +638,10 @@ def main() -> int:
                     args.quote_fallback,
                 )
             has_intraday_data = action != "DATA_UNAVAILABLE"
+            display_price = latest_price if latest_price > 0 else row.close
+            first_manage = first_manage_pct_from_target(target)
+            first_manage_price = display_price * (1 + first_manage) if has_intraday_data and display_price > 0 else 0.0
+            target_hit_rate, first_manage_hit_rate = historical_hit_rates(str(temperature["state"]))
             candidates.append(
                 MonitorCandidate(
                     ticker=row.ticker,
@@ -631,6 +659,12 @@ def main() -> int:
                     target_pct=round(target * 100, 2) if has_intraday_data else 0.0,
                     hard_stop_pct=round(stop * 100, 2) if has_intraday_data else 0.0,
                     trailing_stop_pct=round(trail * 100, 2) if has_intraday_data else 0.0,
+                    first_manage_pct=round(first_manage * 100, 2) if has_intraday_data else 0.0,
+                    first_manage_price=round(first_manage_price, 4),
+                    target_upper_hit_rate_pct=target_hit_rate,
+                    first_manage_hit_rate_pct=first_manage_hit_rate,
+                    market_state=str(temperature["state"]),
+                    event_score=int(event_scores.get(row.ticker, 0)),
                     ma5_distance_pct=row.distance_to_ma5_pct,
                     value_ratio=row.traded_value_ratio,
                     momentum_3d_pct=row.momentum_3d_pct,
@@ -645,6 +679,7 @@ def main() -> int:
         f"股票池 {filter_counts['universe']}",
         f"无有效形态/历史不足 {filter_counts['no_signal_row']}",
         f"5日振幅过大 {filter_counts['range_too_wide']}",
+        f"ATR过低 {filter_counts['atr_too_low']}",
         f"10日涨幅过热 {filter_counts['momentum10_too_high']}",
         f"20日位置过高 {filter_counts['close_position_too_high']}",
         f"分数不足 {filter_counts['score_below_min']}",
@@ -702,7 +737,7 @@ def main() -> int:
         f"- Intraday data status: `{intraday_status}`",
         f"- Quote fallback: `{args.quote_fallback}`",
         f"- Entry window end: `{entry_end.isoformat(timespec='minutes')}`",
-        f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
+        f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, atr>=`{active_min_atr:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
         "",
         "## Filter Funnel",
         "",
@@ -711,6 +746,7 @@ def main() -> int:
         f"| Stock pool | {filter_counts['universe']} |",
         f"| No signal row / insufficient history | {filter_counts['no_signal_row']} |",
         f"| 5-day range too wide | {filter_counts['range_too_wide']} |",
+        f"| ATR too low | {filter_counts['atr_too_low']} |",
         f"| 10-day momentum too high | {filter_counts['momentum10_too_high']} |",
         f"| 20-day close position too high | {filter_counts['close_position_too_high']} |",
         f"| Score below min | {filter_counts['score_below_min']} |",
@@ -742,13 +778,13 @@ def main() -> int:
         )
     lines.extend(
         [
-            "| Action | Ticker | Name | Edge | Score | Trigger | Latest | VWAP | Target | Stop | MA5 Dist | Reasons | Risks |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+            "| Action | Ticker | Name | Edge | Score | Trigger | Latest | VWAP | Target Upper | First Manage | Stop | Hist Hit | MA5 Dist | Reasons | Risks |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
         ]
     )
     for item in candidates:
         lines.append(
-            f"| {item.action} | {item.ticker} | {item.name} | {item.edge_score:.2f} | {item.score:.1f} | {item.entry_trigger:.2f} | {item.latest_price:.2f} | {item.intraday_vwap:.2f} | {item.target_pct:.2f}% | {item.hard_stop_pct:.2f}% | {item.ma5_distance_pct:.2f}% | {item.reasons or '-'} | {item.risks or '-'} |"
+            f"| {item.action} | {item.ticker} | {item.name} | {item.edge_score:.2f} | {item.score:.1f} | {item.entry_trigger:.2f} | {item.latest_price:.2f} | {item.intraday_vwap:.2f} | {item.target_pct:.2f}% | {item.first_manage_price:.2f} | {item.hard_stop_pct:.2f}% | {item.first_manage_hit_rate_pct:.1f}% | {item.ma5_distance_pct:.2f}% | {item.reasons or '-'} | {item.risks or '-'} |"
         )
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"candidates={len(candidates)} markdown={out_path} csv={csv_path}")

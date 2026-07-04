@@ -69,8 +69,8 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
     raise SystemExit("PySide6 is required. Install dependencies or use the packaged EXE.") from exc
 
 
-ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标上沿", "止损", "盈亏", "Edge", "理由"]
-POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标", "止损", "回撤%", "最高", "状态", "备注"]
+ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标上沿", "第一管理线", "止损", "历史命中", "盈亏", "Edge", "理由"]
+POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标上沿", "止损", "回撤%", "最高", "状态", "备注"]
 REPOSITORY = "Sulfoxide319/Stocks"
 AUTOSTART_VALUE_NAME = "StocksTradingAssistant"
 LIVE_WATCH_LIMIT = 30
@@ -698,7 +698,7 @@ class MainWindow(QMainWindow):
             "buy_time": "买入时间",
             "buy_price": "成本",
             "shares": "数量",
-            "target_price": "目标价",
+            "target_price": "目标上沿",
             "hard_stop_price": "止损价",
             "trailing_stop_pct": "回撤%",
             "highest_price": "持仓最高",
@@ -903,7 +903,9 @@ class MainWindow(QMainWindow):
                 self._fmt(item.get("latest_price")),
                 self._fmt(item.get("buy_price") if side == "卖出" else item.get("effective_trigger_price", item.get("trigger_price"))),
                 self._fmt(item.get("target_price")),
+                self._fmt(item.get("first_manage_price")) if side == "买入" else "",
                 self._fmt(item.get("hard_stop_price")),
+                f"{self._fmt(item.get('first_manage_hit_rate_pct'))}%" if side == "买入" and item.get("first_manage_hit_rate_pct") not in {None, ""} else "",
                 self._fmt(item.get("pnl_pct")) if side == "卖出" else "",
                 self._fmt(item.get("edge_score")) if side == "买入" else "",
                 item.get("reason", ""),
@@ -922,7 +924,7 @@ class MainWindow(QMainWindow):
         if not items:
             return {}
         row = items[0].row()
-        keys = ["side", "action", "ticker", "name", "latest_price", "trigger_price", "target_price", "hard_stop_price", "pnl_pct", "edge_score", "reason"]
+        keys = ["side", "action", "ticker", "name", "latest_price", "trigger_price", "target_price", "first_manage_price", "hard_stop_price", "hit_rate", "pnl_pct", "edge_score", "reason"]
         values: dict[str, str] = {}
         for column, key in enumerate(keys):
             item = self.advice_table.item(row, column)
@@ -936,7 +938,8 @@ class MainWindow(QMainWindow):
         self.detail_label.setText(
             f"{row.get('side', '')} {row.get('action', '')} {row.get('ticker', '')} {row.get('name', '')}；"
             f"最新 {row.get('latest_price', '')}，触发/成本 {row.get('trigger_price', '')}，"
-            f"目标 {row.get('target_price', '')}，止损 {row.get('hard_stop_price', '')}。"
+            f"目标上沿 {row.get('target_price', '')}，第一管理线 {row.get('first_manage_price', '')}，"
+            f"止损 {row.get('hard_stop_price', '')}，历史命中 {row.get('hit_rate', '')}。"
         )
         if row.get("side") == "买入":
             self.fill_quick_position_from_selection()
