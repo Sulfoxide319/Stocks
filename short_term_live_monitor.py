@@ -30,7 +30,7 @@ from short_term_pattern_miner import (
     moving_average,
     setup_type,
 )
-from short_term_strategy_backtest import infer_sector_group, passes_strategy
+from short_term_strategy_backtest import infer_sector_group
 from tech_event_backtest import BaoStockDailyClient, PriceBar, fetch_yahoo_history
 from tech_event_radar import DEFAULT_HEADERS, load_watchlist, parse_date
 from intraday_vwap_backtest import dynamic_param_overrides, market_temperature
@@ -320,6 +320,23 @@ def edge_score(row: PatternRow, target_pct: float, stop_pct: float) -> float:
     return (probability * target_pct - (1 - probability) * stop_pct) * 100
 
 
+def strategy_reject_reason(row: PatternRow, min_score: float, ma5_extension_limit: float) -> str:
+    allowed_setups = {"EVENT_PLUS_VOLATILITY", "VOLUME_BREAKOUT", "HIGH_VOLATILITY"}
+    if row.score < min_score:
+        return "score_below_min"
+    if row.setup_type not in allowed_setups:
+        return "setup_not_allowed"
+    if not row.above_ma20:
+        return "below_ma20"
+    if ma5_extension_limit > 0 and row.distance_to_ma5_pct > ma5_extension_limit * 100:
+        return "too_far_above_ma5"
+    if row.distance_to_20d_high_pct < -12:
+        return "too_far_from_20d_high"
+    if row.traded_value < 200_000_000:
+        return "traded_value_below_200m"
+    return ""
+
+
 def monitor_progress(message: str) -> None:
     print(f"MONITOR_PROGRESS|{message}", flush=True)
 
@@ -485,6 +502,20 @@ def main() -> int:
     active_max_close_position = float(overrides.get("max_close_position_20d_pct", args.max_close_position_20d_pct))
 
     candidates: list[MonitorCandidate] = []
+    filter_counts: dict[str, int] = {
+        "universe": total_symbols,
+        "no_signal_row": 0,
+        "range_too_wide": 0,
+        "momentum10_too_high": 0,
+        "close_position_too_high": 0,
+        "score_below_min": 0,
+        "setup_not_allowed": 0,
+        "below_ma20": 0,
+        "too_far_above_ma5": 0,
+        "too_far_from_20d_high": 0,
+        "traded_value_below_200m": 0,
+        "passed_daily_filters": 0,
+    }
     entry_hour, entry_minute = (int(part) for part in args.entry_end_time.split(":", 1))
     entry_end = dt.time(entry_hour, entry_minute)
     monitor_progress("筛选候选股并检查盘中数据")
@@ -497,25 +528,22 @@ def main() -> int:
             sector_momentum, sector_above = sector_context.get(sector, (0.0, 0.0))
             row = signal_row_for_latest(symbol, bars, event_scores, args.min_traded_value, sector, sector_momentum, sector_above)
             if not row:
+                filter_counts["no_signal_row"] += 1
                 continue
             if active_max_5d_range > 0 and row.max_5d_range_pct > active_max_5d_range:
+                filter_counts["range_too_wide"] += 1
                 continue
             if active_max_momentum_10d < 999 and row.momentum_10d_pct > active_max_momentum_10d:
+                filter_counts["momentum10_too_high"] += 1
                 continue
             if active_max_close_position < 100 and row.close_position_20d_pct > active_max_close_position:
+                filter_counts["close_position_too_high"] += 1
                 continue
-            if not passes_strategy(
-                row,
-                args.min_score,
-                {"EVENT_PLUS_VOLATILITY", "VOLUME_BREAKOUT", "HIGH_VOLATILITY"},
-                "ignore",
-                0.025,
-                args.ma5_extension_limit,
-                "ignore",
-                -0.03,
-                0.35,
-            ):
+            strategy_reason = strategy_reject_reason(row, args.min_score, args.ma5_extension_limit)
+            if strategy_reason:
+                filter_counts[strategy_reason] += 1
                 continue
+            filter_counts["passed_daily_filters"] += 1
             target, stop, trail = dynamic_exit_params(row, 0.9, 0.35, 0.7, 0.25)
             action = "WATCH_NEXT_SESSION"
             latest_price = 0.0
@@ -569,8 +597,23 @@ def main() -> int:
                     risks=",".join(risks),
                 )
             )
-
     monitor_progress(f"写入候选结果：{len(candidates)} 条")
+    funnel_parts = [
+        f"股票池 {filter_counts['universe']}",
+        f"无有效形态/历史不足 {filter_counts['no_signal_row']}",
+        f"5日振幅过大 {filter_counts['range_too_wide']}",
+        f"10日涨幅过热 {filter_counts['momentum10_too_high']}",
+        f"20日位置过高 {filter_counts['close_position_too_high']}",
+        f"分数不足 {filter_counts['score_below_min']}",
+        f"形态不允许 {filter_counts['setup_not_allowed']}",
+        f"未站上20日线 {filter_counts['below_ma20']}",
+        f"离MA5过远 {filter_counts['too_far_above_ma5']}",
+        f"离20日高点过远 {filter_counts['too_far_from_20d_high']}",
+        f"成交额不足 {filter_counts['traded_value_below_200m']}",
+        f"通过日线过滤 {filter_counts['passed_daily_filters']}",
+        f"最终候选 {len(candidates)}",
+    ]
+    monitor_progress("筛选漏斗：" + "；".join(funnel_parts))
     action_rank = {
         "BUY_TRIGGER": 4,
         "WATCH": 3,
@@ -616,6 +659,26 @@ def main() -> int:
         f"- Entry window end: `{args.entry_end_time}`",
         f"- Active filters: gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
         "",
+        "## Filter Funnel",
+        "",
+        "| Step | Count |",
+        "|---|---:|",
+        f"| Stock pool | {filter_counts['universe']} |",
+        f"| No signal row / insufficient history | {filter_counts['no_signal_row']} |",
+        f"| 5-day range too wide | {filter_counts['range_too_wide']} |",
+        f"| 10-day momentum too high | {filter_counts['momentum10_too_high']} |",
+        f"| 20-day close position too high | {filter_counts['close_position_too_high']} |",
+        f"| Score below min | {filter_counts['score_below_min']} |",
+        f"| Setup not allowed | {filter_counts['setup_not_allowed']} |",
+        f"| Below MA20 | {filter_counts['below_ma20']} |",
+        f"| Too far above MA5 | {filter_counts['too_far_above_ma5']} |",
+        f"| Too far from 20-day high | {filter_counts['too_far_from_20d_high']} |",
+        f"| Traded value below 200m | {filter_counts['traded_value_below_200m']} |",
+        f"| Passed daily filters | {filter_counts['passed_daily_filters']} |",
+        f"| Final candidates | {len(candidates)} |",
+        "",
+        "## Candidates",
+        "",
     ]
     if data_unavailable:
         lines.extend(
@@ -627,7 +690,7 @@ def main() -> int:
     elif quote_only:
         lines.extend(
             [
-                "> Some candidates only have real-time quote fallback. Quote-only rows cannot confirm VWAP, trigger BUY_NOW, or carry target/stop guidance.",
+                "> Some candidates only have real-time quote fallback. Quote-only rows cannot confirm VWAP or trigger BUY_NOW; displayed trigger/target/stop prices are reference-only.",
                 "",
             ]
         )
