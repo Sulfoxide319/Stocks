@@ -69,8 +69,8 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
     raise SystemExit("PySide6 is required. Install dependencies or use the packaged EXE.") from exc
 
 
-ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标上沿", "第一管理线", "移动止盈", "止损", "VWAP/成本", "历史命中", "盈亏", "Edge", "理由"]
-POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标上沿", "止损", "回撤%", "最高", "状态", "备注"]
+ADVICE_COLUMNS = ["方向", "动作", "状态", "代码", "名称", "最新", "触发/成本", "目标上沿", "第一管理线", "移动止盈", "止损", "VWAP/成本", "历史命中", "盈亏", "Edge", "理由"]
+POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标上沿", "止损", "回撤%", "最高", "管理状态", "状态", "备注"]
 REPOSITORY = "Sulfoxide319/Stocks"
 AUTOSTART_VALUE_NAME = "StocksTradingAssistant"
 LIVE_WATCH_LIMIT = 30
@@ -702,6 +702,7 @@ class MainWindow(QMainWindow):
             "hard_stop_price": "止损价",
             "trailing_stop_pct": "回撤%",
             "highest_price": "持仓最高",
+            "management_state": "管理状态",
             "status": "状态",
             "notes": "备注",
         }
@@ -898,6 +899,7 @@ class MainWindow(QMainWindow):
             values = [
                 side,
                 item.get("action", ""),
+                item.get("management_state", "") if side == "卖出" else "",
                 item.get("ticker", ""),
                 item.get("name", ""),
                 self._fmt(item.get("latest_price")),
@@ -926,7 +928,7 @@ class MainWindow(QMainWindow):
         if not items:
             return {}
         row = items[0].row()
-        keys = ["side", "action", "ticker", "name", "latest_price", "trigger_price", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "hit_rate", "pnl_pct", "edge_score", "reason"]
+        keys = ["side", "action", "management_state", "ticker", "name", "latest_price", "trigger_price", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "hit_rate", "pnl_pct", "edge_score", "reason"]
         values: dict[str, str] = {}
         for column, key in enumerate(keys):
             item = self.advice_table.item(row, column)
@@ -939,7 +941,7 @@ class MainWindow(QMainWindow):
             return
         self.detail_label.setText(
             f"{row.get('side', '')} {row.get('action', '')} {row.get('ticker', '')} {row.get('name', '')}；"
-            f"最新 {row.get('latest_price', '')}，触发/成本 {row.get('trigger_price', '')}，"
+            f"状态 {row.get('management_state', '')}，最新 {row.get('latest_price', '')}，触发/成本 {row.get('trigger_price', '')}，"
             f"目标上沿 {row.get('target_price', '')}，第一管理线 {row.get('first_manage_price', '')}，"
             f"移动止盈 {row.get('trailing_stop_price', '')}，止损 {row.get('hard_stop_price', '')}，"
             f"VWAP/成本 {row.get('vwap_fail_price', '')}，历史命中 {row.get('hit_rate', '')}。"
@@ -996,6 +998,7 @@ class MainWindow(QMainWindow):
             hard_stop_price=self._float(advice.get("hard_stop_price"), existing.hard_stop_price if existing else 0.0),
             trailing_stop_pct=self._float(advice.get("trailing_stop_pct"), existing.trailing_stop_pct if existing else 3.0),
             highest_price=max(buy_price, self._float(advice.get("latest_price"), buy_price)),
+            management_state=existing.management_state if existing else "OPEN",
             status="open",
             notes=f"快速登记；来源：{self.current_payload.get('generated_at', '手动输入')}",
         )
@@ -1075,6 +1078,7 @@ class MainWindow(QMainWindow):
                 self._fmt(position.hard_stop_price),
                 self._fmt(position.trailing_stop_pct),
                 self._fmt(position.highest_price),
+                position.management_state,
                 position.status,
                 position.notes,
             ]
@@ -1116,6 +1120,7 @@ class MainWindow(QMainWindow):
             hard_stop_price=self._float(row["hard_stop_price"]),
             trailing_stop_pct=self._float(row["trailing_stop_pct"], 3.0),
             highest_price=self._float(row["highest_price"], self._float(row["buy_price"])),
+            management_state=row["management_state"] or "OPEN",
             status=row["status"] or "open",
             notes=row["notes"],
         )

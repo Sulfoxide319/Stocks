@@ -124,8 +124,14 @@ class SellAdvice:
     vwap_fail_price: float
     highest_price: float
     pnl_pct: float
+    management_state: str
+    previous_management_state: str
     signal_points: str
     reason: str
+
+
+MANAGEMENT_STATES = {"OPEN", "FIRST_MANAGE_HIT", "PROFIT_PROTECTED", "REDUCED", "EXITED"}
+URGENT_SELL_ACTIONS = {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"}
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -167,6 +173,10 @@ def parse_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def clean_text(value: object) -> str:
+    return str(value or "").strip()
+
+
 def first_manage_pct_from_target(target_pct: float) -> float:
     return max(4.0, target_pct * 0.4)
 
@@ -200,6 +210,45 @@ def sell_signal_points(
     if vwap > 0:
         parts.append(f"尾盘弱势14:45后<VWAP{vwap:.2f}且盈利<1.5%")
     return "；".join(parts)
+
+
+def normalize_management_state(value: object, status: str = "open") -> str:
+    if str(status or "").strip().lower() == "closed":
+        return "EXITED"
+    state = clean_text(value).upper() or "OPEN"
+    return state if state in MANAGEMENT_STATES else "OPEN"
+
+
+def signal_timestamp(today: dt.date, latest_time: str) -> str:
+    return f"{today.isoformat()} {latest_time or dt.datetime.now().time().isoformat(timespec='minutes')}"
+
+
+def transition_management_state(
+    row: dict[str, str],
+    action: str,
+    first_manage_hit: bool,
+    today: dt.date,
+    latest_time: str,
+) -> tuple[str, str]:
+    previous = normalize_management_state(row.get("management_state"), row.get("status", "open"))
+    state = previous
+    timestamp = signal_timestamp(today, latest_time)
+    if row.get("status", "open").lower() == "closed":
+        state = "EXITED"
+    elif previous == "REDUCED":
+        state = "REDUCED"
+    elif action in {"REDUCE_PROFIT", "TRAIL_SELL", "PRE_CLOSE_REDUCE", "VWAP_WEAK_SELL"} and first_manage_hit:
+        state = "PROFIT_PROTECTED"
+        if not row.get("profit_protected_at"):
+            row["profit_protected_at"] = timestamp
+    elif first_manage_hit and previous == "OPEN":
+        state = "FIRST_MANAGE_HIT"
+        if not row.get("first_manage_hit_at"):
+            row["first_manage_hit_at"] = timestamp
+    row["management_state"] = state
+    row["last_signal_action"] = action
+    row["last_signal_at"] = timestamp
+    return previous, state
 
 
 def target_context_note(first_manage_price: float, target_hit_rate: float, first_manage_hit_rate: float, buy_enabled: bool) -> str:
@@ -497,6 +546,7 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
             hard_stop_price = parse_float(row.get("hard_stop_price"))
             trailing_stop_pct = parse_float(row.get("trailing_stop_pct"), 3.0)
             previous_highest = parse_float(row.get("highest_price"), buy_price)
+            current_state = normalize_management_state(row.get("management_state"), row.get("status", "open"))
             if first_manage_price <= 0:
                 first_manage_price = first_manage_price_from_position(buy_price, target_price)
             latest, vwap, intraday_high, latest_time = latest_vwap_for_position(client, ticker, today)
@@ -504,8 +554,18 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
             if latest <= 0:
                 trailing_stop_price = previous_highest * (1 - trailing_stop_pct / 100) if previous_highest > buy_price else 0.0
                 points = sell_signal_points(target_price, first_manage_price, trailing_stop_price, hard_stop_price, vwap, vwap_fail_price)
+                old_state = row.get("management_state", "")
+                old_signal_action = row.get("last_signal_action", "")
+                old_signal_at = row.get("last_signal_at", "")
+                previous_state, new_state = transition_management_state(row, "HOLD_NO_INTRADAY", False, today, latest_time)
+                if (
+                    row.get("management_state", "") != old_state
+                    or row.get("last_signal_action", "") != old_signal_action
+                    or row.get("last_signal_at", "") != old_signal_at
+                ):
+                    changed = True
                 advices.append(
-                    SellAdvice(ticker, row.get("name", ""), "HOLD_NO_INTRADAY", buy_date, buy_price, 0.0, 0.0, target_price, first_manage_price, trailing_stop_price, hard_stop_price, vwap_fail_price, previous_highest, 0.0, points, "暂无5分钟线，不能确认卖点")
+                    SellAdvice(ticker, row.get("name", ""), "HOLD_NO_INTRADAY", buy_date, buy_price, 0.0, 0.0, target_price, first_manage_price, trailing_stop_price, hard_stop_price, vwap_fail_price, previous_highest, 0.0, new_state, previous_state, points, "暂无5分钟线，不能确认卖点")
                 )
                 continue
             highest = max(previous_highest, intraday_high, latest)
@@ -535,8 +595,12 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                 action = "REDUCE_PROFIT"
                 reason = f"已触及第一管理线 {first_manage_price:.2f}，从持仓高点 {highest:.2f} 回撤超过 {trailing_stop_pct:.1f}%，提示保护利润/减仓"
             elif first_manage_price > 0 and latest >= first_manage_price:
-                action = "MANAGE_PROFIT"
-                reason = f"达到第一管理线 {first_manage_price:.2f}，不强制卖出；建议上移止损、盯VWAP，允许手动减仓"
+                if current_state == "OPEN":
+                    action = "MANAGE_PROFIT"
+                    reason = f"达到第一管理线 {first_manage_price:.2f}，不强制卖出；建议上移止损、盯VWAP，允许手动减仓"
+                else:
+                    action = "HOLD_MANAGED"
+                    reason = f"已处于{current_state}状态，继续按第一管理线 {first_manage_price:.2f} 后的移动止盈/VWAP规则管理"
             elif trailing_stop_price > 0 and latest <= trailing_stop_price:
                 action = "TRAIL_SELL"
                 reason = f"从日内/持仓高点 {highest:.2f} 回落超过 {trailing_stop_pct:.1f}%"
@@ -549,6 +613,16 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
             else:
                 action = "HOLD"
                 reason = "未触发止盈、止损、VWAP弱势或收盘前减仓条件"
+            old_state = row.get("management_state", "")
+            old_signal_action = row.get("last_signal_action", "")
+            old_signal_at = row.get("last_signal_at", "")
+            previous_state, new_state = transition_management_state(row, action, first_manage_hit, today, latest_time)
+            if (
+                row.get("management_state", "") != old_state
+                or row.get("last_signal_action", "") != old_signal_action
+                or row.get("last_signal_at", "") != old_signal_at
+            ):
+                changed = True
             advices.append(
                 SellAdvice(
                     ticker=ticker,
@@ -565,13 +639,15 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                     vwap_fail_price=round(vwap_fail_price, 4),
                     highest_price=round(highest, 4),
                     pnl_pct=round(pnl_pct, 2),
+                    management_state=new_state,
+                    previous_management_state=previous_state,
                     signal_points=points,
                     reason=reason,
                 )
             )
     if changed:
         write_positions(positions_path, positions)
-    return sorted(advices, key=lambda item: item.action not in {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"})
+    return sorted(advices, key=lambda item: item.action not in URGENT_SELL_ACTIONS)
 
 
 def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advices: list[BuyAdvice], sell_advices: list[SellAdvice], monitor_report: Path, monitor_csv: Path) -> tuple[Path, Path, Path]:
@@ -581,7 +657,7 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     csv_path = out_dir / f"trade_plan_{phase}_{stamp}.csv"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    urgent = [item for item in sell_advices if item.action in {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"}]
+    urgent = [item for item in sell_advices if item.action in URGENT_SELL_ACTIONS]
     buys = [item for item in buy_advices if item.action == "BUY_NOW"]
     lines = [
         f"# 本地短线交易建议 - {today.isoformat()} {dt.datetime.now():%H:%M:%S}",
@@ -594,12 +670,12 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
         "",
         "## 先看卖出/持仓",
         "",
-        "| 动作 | 代码 | 名称 | 成本 | 最新 | VWAP | 盈亏 | 目标上沿 | 第一管理线 | 移动止盈 | 硬止损 | VWAP弱势 | 理由 |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| 动作 | 状态 | 代码 | 名称 | 成本 | 最新 | VWAP | 盈亏 | 目标上沿 | 第一管理线 | 移动止盈 | 硬止损 | VWAP弱势 | 理由 |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     if sell_advices:
         for item in sell_advices:
-            lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.buy_price:.2f} | {item.latest_price:.2f} | {item.vwap:.2f} | {item.pnl_pct:.2f}% | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.trailing_stop_price:.2f} | {item.hard_stop_price:.2f} | {item.vwap_fail_price:.2f} | {item.reason} |")
+            lines.append(f"| {item.action} | {item.management_state} | {item.ticker} | {item.name} | {item.buy_price:.2f} | {item.latest_price:.2f} | {item.vwap:.2f} | {item.pnl_pct:.2f}% | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.trailing_stop_price:.2f} | {item.hard_stop_price:.2f} | {item.vwap_fail_price:.2f} | {item.reason} |")
     else:
         lines.append("| - | - | 当前没有登记持仓 | - | - | - | - | - | - | - | - | - | - |")
     lines.extend(
@@ -628,13 +704,13 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "target_upper_hit_rate_pct", "first_manage_hit_rate_pct", "pnl_pct", "signal_points", "reason"]
+        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "management_state", "previous_management_state", "target_upper_hit_rate_pct", "first_manage_hit_rate_pct", "pnl_pct", "signal_points", "reason"]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for item in sell_advices:
-            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": item.trailing_stop_price, "hard_stop_price": item.hard_stop_price, "vwap_fail_price": item.vwap_fail_price, "target_upper_hit_rate_pct": "", "first_manage_hit_rate_pct": "", "pnl_pct": item.pnl_pct, "signal_points": item.signal_points, "reason": item.reason})
+            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": item.trailing_stop_price, "hard_stop_price": item.hard_stop_price, "vwap_fail_price": item.vwap_fail_price, "management_state": item.management_state, "previous_management_state": item.previous_management_state, "target_upper_hit_rate_pct": "", "first_manage_hit_rate_pct": "", "pnl_pct": item.pnl_pct, "signal_points": item.signal_points, "reason": item.reason})
         for item in buy_advices:
-            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": "", "hard_stop_price": item.hard_stop_price, "vwap_fail_price": "", "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "pnl_pct": "", "signal_points": "", "reason": item.reason})
+            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": "", "hard_stop_price": item.hard_stop_price, "vwap_fail_price": "", "management_state": "", "previous_management_state": "", "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "pnl_pct": "", "signal_points": "", "reason": item.reason})
 
     shutil.copyfile(report, out_dir / "latest_plan.md")
     shutil.copyfile(json_path, out_dir / "latest_plan.json")
@@ -654,7 +730,7 @@ def payload_from_plan(json_path: Path) -> dict[str, object]:
 def beep_if_needed(args: argparse.Namespace, buy_advices: list[BuyAdvice], sell_advices: list[SellAdvice]) -> None:
     if not args.beep:
         return
-    urgent_sell = any(item.action in {"SELL_NOW", "TAKE_PROFIT", "REDUCE_PROFIT", "MANAGE_PROFIT", "TRAIL_SELL", "VWAP_WEAK_SELL", "PRE_CLOSE_REDUCE"} for item in sell_advices)
+    urgent_sell = any(item.action in URGENT_SELL_ACTIONS for item in sell_advices)
     urgent_buy = any(item.action == "BUY_NOW" for item in buy_advices)
     if not urgent_sell and not urgent_buy:
         return

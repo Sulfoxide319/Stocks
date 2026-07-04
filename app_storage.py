@@ -14,6 +14,7 @@ from typing import Any
 
 
 APP_DIR_NAME = "StocksTradingAssistant"
+MANAGEMENT_STATES = {"OPEN", "FIRST_MANAGE_HIT", "PROFIT_PROTECTED", "REDUCED", "EXITED"}
 POSITION_FIELDS = [
     "ticker",
     "name",
@@ -25,6 +26,12 @@ POSITION_FIELDS = [
     "hard_stop_price",
     "trailing_stop_pct",
     "highest_price",
+    "management_state",
+    "first_manage_hit_at",
+    "profit_protected_at",
+    "reduced_at",
+    "last_signal_action",
+    "last_signal_at",
     "status",
     "notes",
 ]
@@ -42,6 +49,12 @@ class Position:
     hard_stop_price: float = 0.0
     trailing_stop_pct: float = 3.0
     highest_price: float = 0.0
+    management_state: str = "OPEN"
+    first_manage_hit_at: str = ""
+    profit_protected_at: str = ""
+    reduced_at: str = ""
+    last_signal_action: str = ""
+    last_signal_at: str = ""
     status: str = "open"
     notes: str = ""
     id: int | None = None
@@ -120,7 +133,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    ensure_position_columns(conn)
     conn.commit()
+
+
+def ensure_position_columns(conn: sqlite3.Connection) -> None:
+    existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(positions)").fetchall()}
+    columns = {
+        "management_state": "TEXT NOT NULL DEFAULT 'OPEN'",
+        "first_manage_hit_at": "TEXT NOT NULL DEFAULT ''",
+        "profit_protected_at": "TEXT NOT NULL DEFAULT ''",
+        "reduced_at": "TEXT NOT NULL DEFAULT ''",
+        "last_signal_action": "TEXT NOT NULL DEFAULT ''",
+        "last_signal_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {name} {ddl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_management_state ON positions(management_state)")
 
 
 def get_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
@@ -158,6 +188,12 @@ def _clean_text(value: object) -> str:
 def position_from_row(row: dict[str, object]) -> Position:
     buy_price = _float(row.get("buy_price"))
     highest = _float(row.get("highest_price"), buy_price)
+    status = (_clean_text(row.get("status")) or "open").lower()
+    management_state = _clean_text(row.get("management_state")).upper() or "OPEN"
+    if status == "closed":
+        management_state = "EXITED"
+    elif management_state not in MANAGEMENT_STATES:
+        management_state = "OPEN"
     return Position(
         ticker=_clean_text(row.get("ticker")),
         name=_clean_text(row.get("name")),
@@ -169,7 +205,13 @@ def position_from_row(row: dict[str, object]) -> Position:
         hard_stop_price=_float(row.get("hard_stop_price")),
         trailing_stop_pct=_float(row.get("trailing_stop_pct"), 3.0),
         highest_price=highest,
-        status=_clean_text(row.get("status")) or "open",
+        management_state=management_state,
+        first_manage_hit_at=_clean_text(row.get("first_manage_hit_at")),
+        profit_protected_at=_clean_text(row.get("profit_protected_at")),
+        reduced_at=_clean_text(row.get("reduced_at")),
+        last_signal_action=_clean_text(row.get("last_signal_action")),
+        last_signal_at=_clean_text(row.get("last_signal_at")),
+        status=status,
         notes=_clean_text(row.get("notes")),
         id=int(row["id"]) if row.get("id") not in (None, "") else None,
     )
@@ -192,8 +234,12 @@ def validate_position(position: Position) -> list[str]:
         errors.append("目标价和止损价不能为负。")
     if position.trailing_stop_pct < 0:
         errors.append("移动止盈回撤不能为负。")
-    if position.status not in {"open", "closed"}:
+    status = str(position.status or "").strip().lower()
+    management_state = str(position.management_state or "").strip().upper()
+    if status not in {"open", "closed"}:
         errors.append("状态只能是 open 或 closed。")
+    if management_state not in MANAGEMENT_STATES:
+        errors.append("管理状态只能是 OPEN、FIRST_MANAGE_HIT、PROFIT_PROTECTED、REDUCED 或 EXITED。")
     return errors
 
 
@@ -208,11 +254,18 @@ def list_positions(conn: sqlite3.Connection, open_only: bool = False) -> list[Po
 
 
 def save_position(conn: sqlite3.Connection, position: Position) -> int:
+    position.status = str(position.status or "open").strip().lower()
+    position.management_state = str(position.management_state or "OPEN").strip().upper()
+    if position.status == "closed":
+        position.management_state = "EXITED"
     errors = validate_position(position)
     if errors:
         raise ValueError("\n".join(errors))
     values = asdict(position)
     values.pop("id", None)
+    values["management_state"] = str(values.get("management_state") or "OPEN").strip().upper()
+    if values.get("status") == "closed":
+        values["management_state"] = "EXITED"
     if position.id:
         conn.execute(
             """
@@ -227,6 +280,12 @@ def save_position(conn: sqlite3.Connection, position: Position) -> int:
                 hard_stop_price = :hard_stop_price,
                 trailing_stop_pct = :trailing_stop_pct,
                 highest_price = :highest_price,
+                management_state = :management_state,
+                first_manage_hit_at = :first_manage_hit_at,
+                profit_protected_at = :profit_protected_at,
+                reduced_at = :reduced_at,
+                last_signal_action = :last_signal_action,
+                last_signal_at = :last_signal_at,
                 status = :status,
                 notes = :notes,
                 updated_at = CURRENT_TIMESTAMP
@@ -240,12 +299,16 @@ def save_position(conn: sqlite3.Connection, position: Position) -> int:
         """
         INSERT INTO positions (
             ticker, name, buy_date, buy_time, buy_price, shares, target_price,
-            hard_stop_price, trailing_stop_pct, highest_price, status, notes
+            hard_stop_price, trailing_stop_pct, highest_price, management_state,
+            first_manage_hit_at, profit_protected_at, reduced_at,
+            last_signal_action, last_signal_at, status, notes
         )
         VALUES (
             :ticker, :name, :buy_date, :buy_time, :buy_price, :shares,
             :target_price, :hard_stop_price, :trailing_stop_pct,
-            :highest_price, :status, :notes
+            :highest_price, :management_state, :first_manage_hit_at,
+            :profit_protected_at, :reduced_at, :last_signal_action,
+            :last_signal_at, :status, :notes
         )
         """,
         values,
@@ -302,6 +365,12 @@ def update_positions_from_csv(conn: sqlite3.Connection, path: Path) -> None:
                 """
                 UPDATE positions SET
                     highest_price = ?,
+                    management_state = ?,
+                    first_manage_hit_at = ?,
+                    profit_protected_at = ?,
+                    reduced_at = ?,
+                    last_signal_action = ?,
+                    last_signal_at = ?,
                     status = ?,
                     notes = ?,
                     updated_at = CURRENT_TIMESTAMP
@@ -309,7 +378,13 @@ def update_positions_from_csv(conn: sqlite3.Connection, path: Path) -> None:
                 """,
                 (
                     _float(row.get("highest_price")),
-                    _clean_text(row.get("status")) or "open",
+                    "EXITED" if (_clean_text(row.get("status")) or "open").lower() == "closed" else (_clean_text(row.get("management_state")).upper() or "OPEN"),
+                    _clean_text(row.get("first_manage_hit_at")),
+                    _clean_text(row.get("profit_protected_at")),
+                    _clean_text(row.get("reduced_at")),
+                    _clean_text(row.get("last_signal_action")),
+                    _clean_text(row.get("last_signal_at")),
+                    (_clean_text(row.get("status")) or "open").lower(),
                     _clean_text(row.get("notes")),
                     ticker,
                 ),
