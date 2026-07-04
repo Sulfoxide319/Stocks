@@ -157,6 +157,16 @@ def parse_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def target_context_note(ref_price: float, target_pct: float, buy_enabled: bool) -> str:
+    if ref_price <= 0 or target_pct <= 0:
+        return ""
+    first_manage_pct = max(4.0, target_pct * 0.4)
+    first_manage_price = ref_price * (1 + first_manage_pct / 100)
+    if not buy_enabled:
+        return "；观察池不按目标价交易"
+    return f"；目标价是上沿，先看{first_manage_price:.2f}管理线"
+
+
 def phase_for_time(now: dt.datetime) -> str:
     if now.weekday() >= 5:
         return "closed"
@@ -366,6 +376,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
             final_action = "NO_BUY"
             buy_enabled = False
             reason = row.get("risks", "") or action or "未通过盘中执行过滤"
+        reason = f"{reason}{target_context_note(ref_price, target_pct, buy_enabled)}"
         advices.append(
             BuyAdvice(
                 ticker=row.get("ticker", ""),
@@ -520,7 +531,7 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
             "",
             "## 再看买入",
             "",
-            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 目标价 | 止损价 | Edge | 理由 |",
+            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 目标上沿 | 止损价 | Edge | 理由 |",
             "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
         ]
     )

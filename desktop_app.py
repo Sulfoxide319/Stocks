@@ -69,7 +69,7 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
     raise SystemExit("PySide6 is required. Install dependencies or use the packaged EXE.") from exc
 
 
-ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标", "止损", "盈亏", "Edge", "理由"]
+ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标上沿", "止损", "盈亏", "Edge", "理由"]
 POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标", "止损", "回撤%", "最高", "状态", "备注"]
 REPOSITORY = "Sulfoxide319/Stocks"
 AUTOSTART_VALUE_NAME = "StocksTradingAssistant"
