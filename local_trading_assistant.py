@@ -128,6 +128,8 @@ def parse_float(value: object, default: float = 0.0) -> float:
 
 
 def phase_for_time(now: dt.datetime) -> str:
+    if now.weekday() >= 5:
+        return "closed"
     current = now.time()
     if dt.time(9, 20) <= current < dt.time(9, 45):
         return "opening"
@@ -305,11 +307,8 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         elif action == "QUOTE_ONLY":
             priority = 8
             final_action = "QUOTE_ONLY"
-            trigger = 0.0
             vwap = 0.0
-            target_price = 0.0
-            hard_stop_price = 0.0
-            reason = "仅有实时报价兜底，缺少5分钟线/VWAP确认，暂停买入判断"
+            reason = "仅有实时报价兜底，缺少5分钟线/VWAP确认；价位仅作参考，暂停买入判断"
         elif action == "BUY_TRIGGER":
             priority = 1
             final_action = "BUY_NOW"

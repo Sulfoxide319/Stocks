@@ -269,11 +269,12 @@ def latest_intraday_state(
     bars = client.fetch_5m(ticker, trade_date, trade_date)
     bars = [bar for bar in bars if dt.time(9, 30) <= bar.time <= dt.time(15, 0)]
     if not bars:
+        trigger = signal_close * (1 + confirm_buffer)
         if quote_fallback == "sina" and quote_session is not None and trade_date == dt.date.today():
             quote = fetch_sina_quote(quote_session, ticker)
             if quote:
-                return "QUOTE_ONLY", quote.price, 0.0, quote.timestamp, 0.0, ["quote_only"], ["no_intraday_bars", "no_vwap", f"quote_source={quote.source}"]
-        return "DATA_UNAVAILABLE", 0.0, 0.0, "", 0.0, [], ["no_intraday_bars"]
+                return "QUOTE_ONLY", quote.price, 0.0, quote.timestamp, trigger, ["quote_only"], ["no_intraday_bars", "no_vwap", f"quote_source={quote.source}"]
+        return "DATA_UNAVAILABLE", 0.0, 0.0, "", trigger, [], ["no_intraday_bars"]
     first = bars[0]
     latest = bars[-1]
     gap = first.open / signal_close - 1 if signal_close else 0.0
@@ -541,7 +542,7 @@ def main() -> int:
                     session,
                     args.quote_fallback,
                 )
-            has_intraday_data = action not in {"DATA_UNAVAILABLE", "QUOTE_ONLY"}
+            has_intraday_data = action != "DATA_UNAVAILABLE"
             candidates.append(
                 MonitorCandidate(
                     ticker=row.ticker,

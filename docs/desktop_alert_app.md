@@ -26,6 +26,7 @@ run_trading_app.bat
 - Buy triggers and urgent sell actions show a topmost popup, with same-day duplicate alerts suppressed.
 - The sidebar quick position entry writes ticker, buy price, and share count directly into the local SQLite position store.
 - Daily history scans fall back to BaoStock after repeated Yahoo 403 responses, so restricted Yahoo access does not stall the whole stock pool scan.
+- Weekend/manual scans use the closed-market daily path instead of intraday quote fallback; `QUOTE_ONLY` rows keep reference trigger/target/stop prices but still block buy confirmation until 5-minute/VWAP data exists.
 - Opening focus scan during `09:20-09:45`
 - 2-minute intraday buy/sell checks during `09:45-11:30` and `13:00-14:45`
 - Pre-close review during `14:45-15:05`
