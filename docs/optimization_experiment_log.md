@@ -23,6 +23,47 @@ The previous default ranked candidates by quality but allocated capital mostly b
 
 Hard checks for accepted candidate: `bad_300_301=0`, `bad_lots=0`, `bad_tick=0`.
 
+## 2026-07-05 Mainboard Universe Expansion Trial
+
+Baseline: `v0.4.41` default watchlist `config/watchlist.mainboard_liquid.csv`, strict 10-minute engine, no events, end date `2026-07-03`.
+
+### Tested Pools
+
+The expansion trial kept the hard mainboard constraint and did not add `300/301` symbols. The candidate source was built from BaoStock industry-style technology names and then merged only into output watchlists for validation:
+
+- `output/watchlist.mainboard_liquid_plus_active_top50_20260703.csv`: original `629` symbols plus `50` active additions.
+- `output/watchlist.mainboard_liquid_plus_quality_top20_20260703.csv`: original `629` symbols plus `20` higher-quality additions.
+- `output/watchlist.mainboard_liquid_plus_quality_top40_20260703.csv`: original `629` symbols plus `40` higher-quality additions.
+
+### Results
+
+| Scenario | 1M | 3M | 6M | 9M | 12M | 12M DD | 12M Trades | Hard Checks | Decision |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| `v0.4.41` baseline | 16.7714% | 49.1110% | 76.6191% | 86.8375% | 88.4358% | 7.0904% | 75 | 0/0/0 | Current default |
+| `active_top50` | 19.8410% | 47.1395% | 75.7543% | 76.1861% | 77.4178% | 12.4718% | 102 | 0/0/0 | Reject: 3M/6M/9M/12M lower and 12M DD higher |
+| `quality_top20` | 13.2324% | 50.0286% | 67.4103% | 66.1589% | 64.1814% | 10.1653% | 88 | 0/0/0 | Reject: only 3M improves; long windows collapse |
+| `quality_top40` | 12.8631% | 43.7138% | 67.4179% | 66.3475% | 66.1993% | 11.7973% | 96 | 0/0/0 | Reject: broad return degradation and higher DD |
+
+### Root Cause
+
+The expansion failure is not a mechanical pool-size problem. The rejected pools still satisfy `bad_300_301=0`, `bad_lots=0`, and `bad_tick=0`, and their 12M trade counts remain above the 80% minimum. The failure is economic:
+
+- In `quality_top20`, the 20 additions generated `17` 12M closed trades, with total PnL `-2362.08`, average return `-0.4027%`, and win rate `23.53%`.
+- Addition exits concentrated in failure paths: `7` VWAP-fail trades, `6` hard-stop trades, and only `4` trailing-stop winners.
+- The expanded pool also changed portfolio sequencing. Five baseline buys disappeared from the candidate ledger, including later profitable baseline names such as `603920`, `600345`, and `002583`.
+- High raw score did not transfer cleanly to the new source sample. Several additions with `score >= 97.5` still failed via next-day VWAP weakness or hard stop.
+
+### Decision
+
+Do not switch the production/default watchlist to any of the tested expanded pools. Keep `config/watchlist.mainboard_liquid.csv` as the default source until an expansion rule passes the same 1M/3M/6M/9M/12M return gates and keeps 12M max drawdown no higher than `v0.4.41`.
+
+The next valid expansion design should tag experimental symbols by source and treat them as a lower-priority trial sleeve instead of allowing them to compete equally with calibrated core symbols. Required mechanics before another default attempt:
+
+- Preserve a `core` versus `expansion` source label through signal rows, ledger, CSV, and UI.
+- Apply stricter source-specific gates to expansion names: higher minimum score, tighter MA5 extension, and no promotion while recent source-level hard-stop or VWAP-fail rates are high.
+- Use a trial capital cap for expansion names until their rolling 12M contribution is positive and stable.
+- Prefer `core-first` ordering so expansion candidates fill unused capacity rather than displacing qualified core candidates.
+
 ## 2026-07-04 v0.4.38 Follow-Up
 
 Baseline: `v0.4.38`, strict 10-minute engine, no events, end date `2026-07-03`.
