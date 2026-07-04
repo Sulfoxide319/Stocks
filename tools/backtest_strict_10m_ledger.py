@@ -270,6 +270,8 @@ def passes_market_quality(planned: PlannedTrade, state: str, args: argparse.Name
     if state == "cold":
         if float(features.get("traded_value_ratio") or 0.0) < float(args.cold_min_traded_value_ratio):
             return False
+        if float(features.get("atr_pct") or 0.0) < float(args.cold_min_atr_pct):
+            return False
         if float(features.get("momentum_10d_pct") or 0.0) < float(args.cold_min_momentum_10d_pct):
             return False
         if float(features.get("sector_momentum_5d_pct") or 0.0) < float(args.cold_min_sector_momentum_5d_pct):
@@ -1335,6 +1337,7 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "partial_sell_ratio_narrow_rally": args.partial_sell_ratio_narrow_rally,
         "trailing_reference_policy": args.trailing_reference_policy,
         "cold_min_traded_value_ratio": args.cold_min_traded_value_ratio,
+        "cold_min_atr_pct": args.cold_min_atr_pct,
         "cold_min_momentum_10d_pct": args.cold_min_momentum_10d_pct,
         "cold_min_sector_momentum_5d_pct": args.cold_min_sector_momentum_5d_pct,
         "normal_min_5d_range_pct": args.normal_min_5d_range_pct,
@@ -1387,6 +1390,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--partial-sell-ratio-cold", type=float, default=0.5)
     parser.add_argument("--partial-sell-ratio-narrow-rally", type=float, default=0.3)
     parser.add_argument("--cold-min-traded-value-ratio", type=float, default=0.0)
+    parser.add_argument("--cold-min-atr-pct", type=float, default=4.1)
     parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=7.5)
     parser.add_argument("--cold-min-sector-momentum-5d-pct", type=float, default=-999.0)
     parser.add_argument("--normal-min-5d-range-pct", type=float, default=0.0)
@@ -1440,7 +1444,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamic-params", action="store_true", default=True)
     parser.add_argument("--hot-capital-factor", type=float, default=0.0)
     parser.add_argument("--normal-capital-factor", type=float, default=1.0)
-    parser.add_argument("--cold-capital-factor", type=float, default=0.9)
+    parser.add_argument("--cold-capital-factor", type=float, default=1.0)
     parser.add_argument("--hot-min-score", type=float, default=90.0)
     parser.add_argument("--hot-max-gap-up", type=float, default=0.02)
     parser.add_argument("--hot-gap-volume-min-ratio", type=float, default=1.5)

@@ -79,6 +79,8 @@ MONITOR_DEFAULT_ARGS = [
     "0.01",
     "--cold-gap-volume-min-ratio",
     "1.5",
+    "--cold-min-atr-pct",
+    "4.1",
     "--cold-min-momentum-10d-pct",
     "7.5",
     "--cold-max-5d-range-pct",

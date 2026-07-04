@@ -24,19 +24,19 @@ A candidate may become default only if:
 | 4 | Expose practical sell signal points: target upper, first management, trailing stop, hard stop, VWAP/cost weakness, pre-close weakness. | Done | v0.4.26 |
 | 5 | Persist holding management state so repeated scans do not spam first-touch prompts. | Done | v0.4.27 |
 | 6 | Add condition diagnostics for market state, entry timing, volatility, momentum, sector, and exit reason. | Done | v0.4.28 |
-| 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak 10-day momentum; continue monitoring | v0.4.28, v0.4.32 |
+| 7 | Reduce cold-market and false-breakout losses without over-filtering recent profitable rebounds. | Done for cold weak momentum and low-ATR noise; continue monitoring | v0.4.28, v0.4.32, v0.4.33 |
 | 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; ongoing for sell-state parity | v0.4.29 |
 | 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Done for stop floor and trailing reference; continue sensitivity checks | v0.4.30, v0.4.31 |
 | 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Pending | Next research target |
 
 ## Current Baseline
 
-Baseline: `v0.4.32`.
+Baseline: `v0.4.33`.
 
 | Period | Return | Max DD | Trades | Profit Factor |
 |---|---:|---:|---:|---:|
-| 1M | 13.5002% | 3.3571% | 14 | 5.3047 |
-| 3M | 37.2883% | 3.5161% | 30 | 6.5775 |
-| 6M | 56.9841% | 4.3920% | 53 | 4.2156 |
-| 9M | 59.3964% | 5.5709% | 74 | 3.2468 |
-| 12M | 57.8088% | 7.6350% | 90 | 2.6558 |
+| 1M | 13.7512% | 3.5834% | 14 | 4.9490 |
+| 3M | 37.6401% | 3.8198% | 29 | 6.0905 |
+| 6M | 59.7816% | 3.9371% | 49 | 4.5010 |
+| 9M | 65.1715% | 5.2000% | 68 | 3.5786 |
+| 12M | 63.0575% | 7.2032% | 82 | 2.8959 |

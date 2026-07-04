@@ -440,6 +440,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cold-min-score", type=float, default=87.0)
     parser.add_argument("--cold-max-gap-up", type=float, default=-1.0)
     parser.add_argument("--cold-gap-volume-min-ratio", type=float, default=1.5)
+    parser.add_argument("--cold-min-atr-pct", type=float, default=4.1)
     parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=7.5)
     parser.add_argument("--cold-max-5d-range-pct", type=float, default=1.0)
     parser.add_argument("--cold-max-momentum-10d-pct", type=float, default=1.0)
@@ -566,7 +567,12 @@ def main() -> int:
     active_gap_volume_min_ratio = float(overrides.get("gap_volume_min_ratio", args.gap_volume_min_ratio))
     active_min_score = float(overrides.get("min_score", args.min_score))
     active_max_5d_range = float(overrides.get("max_5d_range_pct", args.max_5d_range_pct))
-    active_min_atr = float(args.normal_min_atr_pct) if str(temperature["state"]) == "normal" else 0.0
+    if str(temperature["state"]) == "normal":
+        active_min_atr = float(args.normal_min_atr_pct)
+    elif str(temperature["state"]) == "cold":
+        active_min_atr = float(args.cold_min_atr_pct)
+    else:
+        active_min_atr = 0.0
     active_min_momentum_10d = float(args.cold_min_momentum_10d_pct) if str(temperature["state"]) == "cold" else -999.0
     active_max_momentum_10d = float(overrides.get("max_momentum_10d_pct", args.max_momentum_10d_pct))
     active_max_close_position = float(overrides.get("max_close_position_20d_pct", args.max_close_position_20d_pct))
