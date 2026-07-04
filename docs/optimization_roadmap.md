@@ -28,23 +28,25 @@ A candidate may become default only if:
 | 8 | Align strict backtest exits with live sell rules. | Done for VWAP fail; managed-position VWAP weakness now uses a two-confirmation path in backtest and live alerts | v0.4.29, v0.4.36, v0.4.37 |
 | 9 | Tune risk exits and trailing behavior to preserve winners while cutting noise losses. | Improved for first-management VWAP pullbacks, normal-market trailing winners, and mature profit-cushion concentration | v0.4.30, v0.4.31, v0.4.37, v0.4.38, v0.4.39, docs/optimization_experiment_log.md |
 | 10 | Improve external validation robustness: rolling windows, policy reproduction, and walk-forward style checks. | Done for rolling strict validation; added reusable baseline-vs-candidate summary comparison and v0.4.38 proxy checks for release gates | v0.4.34, v0.4.37, v0.4.38, v0.4.39, tools/compare_backtest_summaries.py |
+| 11 | Add quality-aware buy-side capital sizing instead of equal slot allocation only. | Done; quality default beats equal, score-linear, and edge-linear in 1M/3M/6M/9M/12M while keeping 12M DD below v0.4.40 | v0.4.41 |
 
 ## Current Research Leads
 
 | Lead | Evidence | Default Decision |
 |---|---|---|
 | Conditional concentration / aggressive profile | `max-positions=2` with 70% capital per state lifts 1M/3M/6M/9M/12M returns to `15.1691%/42.3105%/68.1952%/74.3256%/74.5904%`, with clean `bad_300_301/bad_lots/bad_tick=0/0/0`. Mature profit-cushion gating keeps fixed and rolling gates clean while preserving part of the long-window gain. | Promoted in v0.4.39 only after `8%` equity cushion and `120` elapsed trading days. |
-| Quality sorting | `--selection-mode quality` holds 12M DD flat and slightly improves 6M/9M/12M. | Not default: 1M and 3M returns are lower than v0.4.38. |
+| Quality-aware position sizing | `quality` sizing with Edge floor, traded-value confirmed quality uplift, and a 3.5% drawdown governor improves 1M/3M/6M/9M/12M over equal, score-linear, and edge-linear sizing. | Promoted in v0.4.41. |
+| Quality sorting | `--selection-mode quality` holds 12M DD flat and slightly improves 6M/9M/12M. | Still not default: v0.4.41 improves sizing, not buy ranking. |
 | Simple cold/sector filters | Multiple follow-up tests in `docs/optimization_experiment_log.md`. | Rejected: over-filtering removes profitable rebounds. |
 
 ## Current Baseline
 
-Baseline: `v0.4.39`.
+Baseline: `v0.4.41`.
 
 | Period | Return | Max DD | Trades | Profit Factor |
 |---|---:|---:|---:|---:|
-| 1M | 13.7512% | 3.5834% | 14 | 4.9490 |
-| 3M | 41.5900% | 3.7516% | 29 | 6.9755 |
-| 6M | 64.9549% | 3.9371% | 49 | 4.8789 |
-| 9M | 71.2338% | 5.2000% | 63 | 3.8628 |
-| 12M | 72.3845% | 7.2032% | 75 | 3.1659 |
+| 1M | 16.7714% | 4.0568% | 14 | 5.2905 |
+| 3M | 49.1110% | 4.1093% | 29 | 7.2641 |
+| 6M | 76.6191% | 4.6716% | 49 | 4.7995 |
+| 9M | 86.8375% | 5.2586% | 63 | 3.9879 |
+| 12M | 88.4358% | 7.0904% | 75 | 3.3479 |

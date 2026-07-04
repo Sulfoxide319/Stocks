@@ -419,7 +419,7 @@ class TradingAssistantApp:
     def create_tree(self, parent: ttk.Frame) -> ttk.Treeview:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
-        columns = ("side", "action", "ticker", "name", "latest", "trigger", "target", "first_manage", "stop", "sellable_hit", "touch_hit", "manage_hit", "samples", "pnl", "edge", "reason")
+        columns = ("side", "action", "ticker", "name", "latest", "trigger", "capital", "quality", "target", "first_manage", "stop", "sellable_hit", "touch_hit", "manage_hit", "samples", "sample_bucket", "pnl", "edge", "reason")
         tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
         headings = {
             "side": "方向",
@@ -428,6 +428,8 @@ class TradingAssistantApp:
             "name": "名称",
             "latest": "最新",
             "trigger": "触发/成本",
+            "capital": "资金%",
+            "quality": "质量",
             "target": "目标",
             "first_manage": "管理线",
             "stop": "止损",
@@ -435,6 +437,7 @@ class TradingAssistantApp:
             "touch_hit": "触及上沿",
             "manage_hit": "管理线%",
             "samples": "N",
+            "sample_bucket": "样本桶",
             "pnl": "盈亏",
             "edge": "Edge",
             "reason": "理由",
@@ -446,6 +449,8 @@ class TradingAssistantApp:
             "name": 108,
             "latest": 76,
             "trigger": 86,
+            "capital": 72,
+            "quality": 70,
             "target": 76,
             "first_manage": 78,
             "stop": 76,
@@ -453,11 +458,12 @@ class TradingAssistantApp:
             "touch_hit": 78,
             "manage_hit": 78,
             "samples": 52,
+            "sample_bucket": 150,
             "pnl": 72,
             "edge": 64,
             "reason": 360,
         }
-        numeric = {"latest", "trigger", "target", "first_manage", "stop", "sellable_hit", "touch_hit", "manage_hit", "samples", "pnl", "edge"}
+        numeric = {"latest", "trigger", "capital", "target", "first_manage", "stop", "samples", "pnl", "edge"}
         for column in columns:
             tree.heading(column, text=headings[column])
             tree.column(column, width=widths[column], anchor="e" if column in numeric else "w", stretch=column == "reason")
@@ -749,9 +755,12 @@ class TradingAssistantApp:
                 row.get("name", ""),
                 self.fmt(row.get("latest_price")),
                 self.fmt(row.get("buy_price")),
+                "",
+                "",
                 self.fmt(row.get("target_price")),
                 self.fmt(row.get("first_manage_price")),
                 self.fmt(row.get("hard_stop_price")),
+                "",
                 "",
                 "",
                 "",
@@ -769,13 +778,16 @@ class TradingAssistantApp:
                 row.get("name", ""),
                 self.fmt(row.get("latest_price")),
                 self.fmt(row.get("trigger_price")),
+                f"{self.fmt(row.get('suggested_capital_pct'))}%",
+                f"{row.get('position_quality_grade', '')}/{self.fmt(row.get('position_quality_score'))}",
                 self.fmt(row.get("target_price")),
                 self.fmt(row.get("first_manage_price")),
                 self.fmt(row.get("hard_stop_price")),
-                f"{self.fmt(row.get('target_upper_hit_rate_pct'))}%",
-                f"{self.fmt(row.get('target_upper_touch_rate_pct'))}%",
-                f"{self.fmt(row.get('first_manage_hit_rate_pct'))}%",
+                self.hit_rate_fmt(row.get("target_upper_hit_rate_pct")),
+                self.hit_rate_fmt(row.get("target_upper_touch_rate_pct")),
+                self.hit_rate_fmt(row.get("first_manage_hit_rate_pct")),
                 self.fmt(row.get("hit_rate_sample_size")),
+                row.get("hit_rate_bucket", ""),
                 "",
                 self.fmt(row.get("edge_score")),
                 row.get("reason", ""),
@@ -865,17 +877,19 @@ class TradingAssistantApp:
         values = tree.item(selected[0], "values")
         if not values:
             return
-        side, action, ticker, name, latest, trigger, target, first_manage, stop, sellable_hit, touch_hit, manage_hit, samples, pnl, edge, reason = values
+        side, action, ticker, name, latest, trigger, capital, quality, target, first_manage, stop, sellable_hit, touch_hit, manage_hit, samples, sample_bucket, pnl, edge, reason = values
         self.detail_title.set(f"{side} {action} - {ticker} {name}")
         pieces = [
             f"最新价：{latest or '-'}",
             f"触发/成本：{trigger or '-'}",
+            f"建议资金：{capital or '-'}",
+            f"质量：{quality or '-'}",
             f"目标价：{target or '-'}",
             f"第一管理线：{first_manage or '-'}",
             f"止损价：{stop or '-'}",
         ]
         if sellable_hit or touch_hit or manage_hit:
-            pieces.append(f"12M概率：可卖上沿 {sellable_hit or '-'} / 触及上沿 {touch_hit or '-'} / 管理线 {manage_hit or '-'} / N={samples or '-'}")
+            pieces.append(f"12M概率：可卖上沿 {sellable_hit or '-'} / 触及上沿 {touch_hit or '-'} / 管理线 {manage_hit or '-'} / N={samples or '-'} / 桶={sample_bucket or '-'}")
         if pnl:
             pieces.append(f"盈亏：{pnl}")
         if edge:
@@ -1027,6 +1041,15 @@ class TradingAssistantApp:
         if abs(number) >= 1000:
             return f"{number:,.0f}"
         return f"{number:.2f}"
+
+    @staticmethod
+    def hit_rate_fmt(value: object) -> str:
+        if value in (None, ""):
+            return "样本不足"
+        try:
+            return f"{float(value):.2f}%"
+        except (TypeError, ValueError):
+            return str(value)
 
 
 def main() -> int:

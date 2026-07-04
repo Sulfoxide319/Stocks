@@ -21,6 +21,14 @@ from typing import Any
 import requests
 
 from baostock_intraday import BaoStock5mClient, IntradayBar
+from position_sizing import estimated_edge_score, position_sizing_for_signal
+from hit_rate_calibration import (
+    MIN_BUCKET_SAMPLE_SIZE,
+    bucket_key,
+    bucket_label,
+    candidate_bucket_queries,
+    sample_size as calibration_sample_size,
+)
 from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols
 from short_term_pattern_miner import (
     PatternRow,
@@ -57,11 +65,18 @@ class MonitorCandidate:
     trailing_stop_pct: float
     first_manage_pct: float
     first_manage_price: float
-    target_upper_hit_rate_pct: float
-    target_upper_touch_rate_pct: float
-    first_manage_hit_rate_pct: float
+    target_upper_hit_rate_pct: float | None
+    target_upper_touch_rate_pct: float | None
+    first_manage_hit_rate_pct: float | None
     hit_rate_sample_size: int
     hit_rate_source: str
+    hit_rate_bucket: str
+    hit_rate_warning: str
+    position_quality_score: float
+    position_quality_grade: str
+    capital_factor: float
+    suggested_capital_pct: float
+    capital_reason: str
     market_state: str
     event_score: int
     ma5_distance_pct: float
@@ -84,11 +99,13 @@ class EventScoreContext:
 
 @dataclass(frozen=True)
 class HitRateStats:
-    target_upper_hit_rate_pct: float
-    first_manage_hit_rate_pct: float
-    target_upper_touch_rate_pct: float = 0.0
+    target_upper_hit_rate_pct: float | None
+    first_manage_hit_rate_pct: float | None
+    target_upper_touch_rate_pct: float | None = None
     sample_size: int = 0
-    source: str = "fallback"
+    source: str = "insufficient_samples"
+    bucket: str = "样本不足"
+    warning: str = ""
 
 
 @dataclass(frozen=True)
@@ -202,10 +219,16 @@ def first_manage_pct_from_target(target_pct: float) -> float:
     return max(0.04, target_pct * 0.4)
 
 
-def fallback_hit_rates(market_state: str) -> HitRateStats:
-    if market_state == "narrow_rally":
-        return HitRateStats(target_upper_hit_rate_pct=0.0, first_manage_hit_rate_pct=50.0)
-    return HitRateStats(target_upper_hit_rate_pct=3.54, first_manage_hit_rate_pct=35.4)
+def insufficient_hit_rates(reason: str) -> HitRateStats:
+    return HitRateStats(
+        target_upper_hit_rate_pct=None,
+        target_upper_touch_rate_pct=None,
+        first_manage_hit_rate_pct=None,
+        sample_size=0,
+        source="insufficient_samples",
+        bucket="样本不足",
+        warning=reason,
+    )
 
 
 def load_hit_rate_calibration(path: Path) -> dict[str, Any]:
@@ -218,34 +241,83 @@ def load_hit_rate_calibration(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def historical_hit_rates(market_state: str, calibration: dict[str, Any] | None = None) -> HitRateStats:
-    fallback = fallback_hit_rates(market_state)
+def hit_rate_stats_from_row(row: dict[str, Any], source: str, bucket: str, warning: str = "") -> HitRateStats:
+    return HitRateStats(
+        target_upper_hit_rate_pct=float(row.get("target_upper_sellable_hit_rate_pct") or 0.0),
+        first_manage_hit_rate_pct=float(row.get("first_manage_sellable_hit_rate_pct") or 0.0),
+        target_upper_touch_rate_pct=float(row.get("target_upper_touch_rate_pct") or 0.0),
+        sample_size=calibration_sample_size(row),
+        source=source,
+        bucket=bucket,
+        warning=warning or str(row.get("sample_warning") or ""),
+    )
+
+
+def historical_hit_rates(
+    market_state: str,
+    calibration: dict[str, Any] | None = None,
+    *,
+    setup_type: str = "",
+    score: object = "",
+    traded_value_ratio: object = "",
+    atr_pct: object = "",
+    momentum_10d_pct: object = "",
+    sector_group: str = "",
+) -> HitRateStats:
     if not calibration:
-        return fallback
+        return insufficient_hit_rates("missing_calibration")
     periods = calibration.get("periods")
     if not isinstance(periods, dict):
-        return fallback
+        return insufficient_hit_rates("invalid_calibration")
     period_key = str(calibration.get("default_period") or "12M")
     period_data = periods.get(period_key) or periods.get("12M")
     if not isinstance(period_data, dict):
-        return fallback
+        return insufficient_hit_rates("missing_period")
+    try:
+        min_samples = int(float(calibration.get("min_bucket_sample_size") or MIN_BUCKET_SAMPLE_SIZE))
+    except (TypeError, ValueError):
+        min_samples = MIN_BUCKET_SAMPLE_SIZE
+    min_samples = max(1, min_samples)
+
+    bucket_rows = period_data.get("buckets")
+    if isinstance(bucket_rows, list):
+        bucket_map: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in bucket_rows:
+            if not isinstance(item, dict):
+                continue
+            bucket_type = str(item.get("bucket_type") or "")
+            key = str(item.get("bucket_key") or "")
+            if bucket_type and key:
+                bucket_map[(bucket_type, key)] = item
+        for bucket_type, criteria in candidate_bucket_queries(
+            market_state=market_state,
+            setup_type=setup_type,
+            score=score,
+            traded_value_ratio=traded_value_ratio,
+            atr_pct=atr_pct,
+            momentum_10d_pct=momentum_10d_pct,
+            sector_group=sector_group,
+        ):
+            if bucket_type == "overall":
+                continue
+            key = bucket_key(criteria)
+            selected = bucket_map.get((bucket_type, key))
+            if selected and calibration_sample_size(selected) >= min_samples:
+                return hit_rate_stats_from_row(selected, f"bucket_12M_{bucket_type}", str(selected.get("bucket_label") or bucket_label(criteria)))
+
     market_state_rows = period_data.get("market_state")
-    selected: dict[str, Any] | None = None
-    source = "calibration_12M_overall"
     if isinstance(market_state_rows, dict) and isinstance(market_state_rows.get(market_state), dict):
         selected = market_state_rows.get(market_state)
-        source = f"calibration_12M_{market_state}"
-    elif isinstance(period_data.get("overall"), dict):
-        selected = period_data.get("overall")
-    if not selected:
-        return fallback
-    return HitRateStats(
-        target_upper_hit_rate_pct=float(selected.get("target_upper_sellable_hit_rate_pct") or 0.0),
-        first_manage_hit_rate_pct=float(selected.get("first_manage_sellable_hit_rate_pct") or 0.0),
-        target_upper_touch_rate_pct=float(selected.get("target_upper_touch_rate_pct") or 0.0),
-        sample_size=int(selected.get("sample_size") or 0),
-        source=source,
-    )
+        if calibration_sample_size(selected) >= min_samples:
+            return hit_rate_stats_from_row(selected, f"market_state_12M_{market_state}", f"market_state:{market_state}")
+    selected = period_data.get("overall")
+    if isinstance(selected, dict) and calibration_sample_size(selected) >= min_samples:
+        return hit_rate_stats_from_row(selected, "overall_12M", "overall")
+    return insufficient_hit_rates("no_bucket_with_enough_samples")
+
+
+def format_hit_rate(value: float | None) -> str:
+    return "样本不足" if value is None else f"{value:.1f}%"
 
 
 def signal_row_for_latest(
@@ -394,17 +466,14 @@ def latest_intraday_state(
 
 
 def edge_score(row: PatternRow, target_pct: float, stop_pct: float) -> float:
-    probability = 0.35 + max(0.0, row.score - 85) * 0.006
-    if row.traded_value_ratio >= 1.5:
-        probability += 0.04
-    if 2 <= row.momentum_3d_pct <= 12:
-        probability += 0.03
-    if row.distance_to_ma5_pct > 4:
-        probability -= 0.08
-    if row.distance_to_ma5_pct < -3:
-        probability -= 0.05
-    probability = min(0.68, max(0.22, probability))
-    return (probability * target_pct - (1 - probability) * stop_pct) * 100
+    return estimated_edge_score(
+        row.score,
+        target_pct,
+        stop_pct,
+        row.traded_value_ratio,
+        row.momentum_3d_pct,
+        row.distance_to_ma5_pct,
+    )
 
 
 def strategy_reject_reason(row: PatternRow, min_score: float, ma5_extension_limit: float) -> str:
@@ -466,6 +535,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-score", type=float, default=83)
     parser.add_argument("--buy-min-score", type=float, default=90)
     parser.add_argument("--top", type=int, default=30)
+    parser.add_argument("--max-positions", type=int, default=3)
+    parser.add_argument("--position-sizing-mode", choices=["equal", "score_linear", "edge_linear", "quality"], default="quality")
+    parser.add_argument("--quality-capital-min-factor", type=float, default=0.70)
+    parser.add_argument("--quality-capital-max-factor", type=float, default=1.40)
+    parser.add_argument("--max-single-position-pct", type=float, default=45.0)
     parser.add_argument("--min-traded-value", type=float, default=200_000_000)
     parser.add_argument("--ma5-extension-limit", type=float, default=0.04)
     parser.add_argument("--entry-end-time", default="11:20")
@@ -745,7 +819,50 @@ def main() -> int:
             display_price = latest_price if latest_price > 0 else row.close
             first_manage = first_manage_pct_from_target(target)
             first_manage_price = display_price * (1 + first_manage) if has_intraday_data and display_price > 0 else 0.0
-            hit_rates = historical_hit_rates(str(temperature["state"]), hit_rate_calibration)
+            hit_rates = historical_hit_rates(
+                str(temperature["state"]),
+                hit_rate_calibration,
+                setup_type=row.setup_type,
+                score=row.score,
+                traded_value_ratio=row.traded_value_ratio,
+                atr_pct=row.atr_pct,
+                momentum_10d_pct=row.momentum_10d_pct,
+                sector_group=row.sector_group,
+            )
+            edge_value = round(edge_score(row, target, stop), 4) if has_intraday_data else 0.0
+            sizing = position_sizing_for_signal(
+                mode=str(args.position_sizing_mode),
+                score=row.score,
+                setup_type=row.setup_type,
+                target_pct=target,
+                hard_stop_pct=stop,
+                traded_value_ratio=row.traded_value_ratio,
+                atr_pct=row.atr_pct,
+                momentum_3d_pct=row.momentum_3d_pct,
+                momentum_10d_pct=row.momentum_10d_pct,
+                distance_to_ma5_pct=row.distance_to_ma5_pct,
+                close_position_20d_pct=row.close_position_20d_pct,
+                sector_momentum_5d_pct=row.sector_momentum_5d_pct,
+                edge_score_value=edge_value,
+                first_manage_hit_rate_pct=hit_rates.first_manage_hit_rate_pct,
+                target_upper_hit_rate_pct=hit_rates.target_upper_hit_rate_pct,
+                target_upper_touch_rate_pct=hit_rates.target_upper_touch_rate_pct,
+                hit_rate_sample_size=hit_rates.sample_size,
+                max_positions=args.max_positions,
+                market_capital_factor=0.0 if str(temperature["state"]) == "hot" else 1.0,
+                min_factor=args.quality_capital_min_factor,
+                max_factor=args.quality_capital_max_factor,
+                max_single_position_pct=args.max_single_position_pct,
+            )
+            is_hot_market = str(temperature["state"]) == "hot"
+            can_allocate = (
+                has_intraday_data
+                and not is_hot_market
+                and action not in {"DATA_UNAVAILABLE", "QUOTE_ONLY", "NO_NEW_ENTRY", "WATCH_SCORE_ONLY"}
+                and row.score >= args.buy_min_score
+            )
+            suggested_capital_pct = sizing.suggested_capital_pct if can_allocate else 0.0
+            capital_reason = sizing.reason if can_allocate else "hot市场暂停新开仓" if is_hot_market else "观察/数据不足/分数不足，不提示投入资金"
             candidates.append(
                 MonitorCandidate(
                     ticker=row.ticker,
@@ -753,7 +870,7 @@ def main() -> int:
                     signal_date=row.date,
                     setup_type=row.setup_type,
                     score=row.score,
-                    edge_score=round(edge_score(row, target, stop), 4) if has_intraday_data else 0.0,
+                    edge_score=edge_value,
                     action=action,
                     close=row.close,
                     latest_price=round(latest_price, 4),
@@ -770,6 +887,13 @@ def main() -> int:
                     first_manage_hit_rate_pct=hit_rates.first_manage_hit_rate_pct,
                     hit_rate_sample_size=hit_rates.sample_size,
                     hit_rate_source=hit_rates.source,
+                    hit_rate_bucket=hit_rates.bucket,
+                    hit_rate_warning=hit_rates.warning,
+                    position_quality_score=sizing.quality_score,
+                    position_quality_grade=sizing.quality_grade,
+                    capital_factor=sizing.capital_factor,
+                    suggested_capital_pct=suggested_capital_pct,
+                    capital_reason=capital_reason,
                     market_state=str(temperature["state"]),
                     event_score=int(event_scores.get(row.ticker, 0)),
                     ma5_distance_pct=row.distance_to_ma5_pct,
@@ -810,7 +934,7 @@ def main() -> int:
         "QUOTE_ONLY": 0,
         "DATA_UNAVAILABLE": 0,
     }
-    candidates.sort(key=lambda item: (action_rank.get(item.action, 1), item.edge_score, item.score), reverse=True)
+    candidates.sort(key=lambda item: (action_rank.get(item.action, 1), item.suggested_capital_pct, item.edge_score, item.score), reverse=True)
     candidates = candidates[: args.top]
     data_unavailable = args.mode == "intraday" and candidates and all(item.action == "DATA_UNAVAILABLE" for item in candidates)
     quote_only = args.mode == "intraday" and candidates and any(item.action == "QUOTE_ONLY" for item in candidates)
@@ -842,7 +966,7 @@ def main() -> int:
         f"- Market state: `{temperature['state']}` breadth_ma20=`{temperature['breadth_ma20']:.2%}` avg5d=`{temperature['avg_5d_return']:.2%}`",
         f"- Event score source: `{event_context.path or '-'}` status=`{event_context.status}` age_days=`{event_context.age_days if event_context.age_days is not None else '-'}` warning=`{event_context.warning or '-'}`",
         f"- Intraday data status: `{intraday_status}`",
-        f"- Hit-rate calibration: `{args.hit_rate_calibration}` status=`{'loaded' if hit_rate_calibration else 'fallback'}`",
+        f"- Hit-rate calibration: `{args.hit_rate_calibration}` status=`{'loaded' if hit_rate_calibration else 'missing_or_invalid'}` min_samples=`{hit_rate_calibration.get('min_bucket_sample_size', MIN_BUCKET_SAMPLE_SIZE) if hit_rate_calibration else MIN_BUCKET_SAMPLE_SIZE}`",
         f"- Quote fallback: `{args.quote_fallback}`",
         f"- Entry window end: `{entry_end.isoformat(timespec='minutes')}`",
         f"- Active filters: score>=`{active_min_score:.1f}`, gap_up<=`{active_max_gap_up:.1%}`, value_ratio>=`{active_gap_volume_min_ratio:.2f}`, range5<=`{active_max_5d_range:.1f}`, atr>=`{active_min_atr:.1f}`, momentum10>=`{active_min_momentum_10d:.1f}`, momentum10<=`{active_max_momentum_10d:.1f}`, pos20<=`{active_max_close_position:.1f}`",
@@ -887,13 +1011,13 @@ def main() -> int:
         )
     lines.extend(
         [
-            "| Action | Ticker | Name | Edge | Score | Trigger | Latest | VWAP | Target Upper | First Manage | Stop | Sellable Upper% | Touch Upper% | Manage% | N | MA5 Dist | Reasons | Risks |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+            "| Action | Ticker | Name | Edge | Score | Quality | Capital | Trigger | Latest | VWAP | Target Upper | First Manage | Stop | Sellable Upper | Touch Upper | Manage | N | Bucket | MA5 Dist | Reasons | Risks |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|---|",
         ]
     )
     for item in candidates:
         lines.append(
-            f"| {item.action} | {item.ticker} | {item.name} | {item.edge_score:.2f} | {item.score:.1f} | {item.entry_trigger:.2f} | {item.latest_price:.2f} | {item.intraday_vwap:.2f} | {item.target_pct:.2f}% | {item.first_manage_price:.2f} | {item.hard_stop_pct:.2f}% | {item.target_upper_hit_rate_pct:.1f}% | {item.target_upper_touch_rate_pct:.1f}% | {item.first_manage_hit_rate_pct:.1f}% | {item.hit_rate_sample_size} | {item.ma5_distance_pct:.2f}% | {item.reasons or '-'} | {item.risks or '-'} |"
+            f"| {item.action} | {item.ticker} | {item.name} | {item.edge_score:.2f} | {item.score:.1f} | {item.position_quality_grade}/{item.position_quality_score:.2f} | {item.suggested_capital_pct:.1f}% | {item.entry_trigger:.2f} | {item.latest_price:.2f} | {item.intraday_vwap:.2f} | {item.target_pct:.2f}% | {item.first_manage_price:.2f} | {item.hard_stop_pct:.2f}% | {format_hit_rate(item.target_upper_hit_rate_pct)} | {format_hit_rate(item.target_upper_touch_rate_pct)} | {format_hit_rate(item.first_manage_hit_rate_pct)} | {item.hit_rate_sample_size} | {item.hit_rate_bucket} | {item.ma5_distance_pct:.2f}% | {item.reasons or '-'} | {item.risks or '-'} |"
         )
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"candidates={len(candidates)} markdown={out_path} csv={csv_path}")

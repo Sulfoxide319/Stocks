@@ -22,6 +22,14 @@ import requests
 
 from baostock_intraday import BaoStock5mClient, IntradayBar
 from market_universe import DEFAULT_BUYABLE_PREFIXES, filter_symbols
+from position_sizing import estimated_edge_score, position_sizing_from_features
+from hit_rate_calibration import (
+    MIN_BUCKET_SAMPLE_SIZE,
+    BUCKET_PRIORITY,
+    bucket_key,
+    bucket_label,
+    candidate_bucket_queries,
+)
 from short_term_pattern_miner import official_event_score_adjustment, official_event_score_by_symbol
 from short_term_strategy_backtest import (
     PlannedTrade,
@@ -282,6 +290,38 @@ def effective_market_capital_factor(state: str, aggressive_active: bool, args: a
     if state not in {"cold", "narrow_rally"} and float(args.profit_cushion_normal_capital_factor) >= 0:
         return max(0.0, min(1.0, float(args.profit_cushion_normal_capital_factor)))
     return market_capital_factor(state, args)
+
+
+def sizing_result_for_trade(
+    planned: PlannedTrade,
+    max_positions_for_day: int,
+    market_factor: float,
+    dd_factor: float,
+    args: argparse.Namespace,
+):
+    edge = estimated_edge_score(
+        planned.score,
+        planned.target_pct,
+        planned.hard_stop_pct,
+        float(planned.features.get("traded_value_ratio") or 0.0),
+        float(planned.features.get("momentum_3d_pct") or 0.0),
+        float(planned.features.get("distance_to_ma5_pct") or 0.0),
+    )
+    return position_sizing_from_features(
+        mode=str(args.position_sizing_mode),
+        score=planned.score,
+        setup_type=planned.setup_type,
+        target_pct=planned.target_pct,
+        hard_stop_pct=planned.hard_stop_pct,
+        features=planned.features,
+        edge_score_value=edge,
+        max_positions=max_positions_for_day,
+        market_capital_factor=market_factor,
+        drawdown_capital_factor=dd_factor,
+        min_factor=float(args.quality_capital_min_factor),
+        max_factor=float(args.quality_capital_max_factor),
+        max_single_position_pct=float(args.max_single_position_pct),
+    )
 
 
 def first_manage_pct(planned: PlannedTrade, args: argparse.Namespace) -> float:
@@ -858,6 +898,67 @@ def summarize_sell_path_group(period: str, group_type: str, group_value: str, ro
     }
 
 
+def hit_rate_item_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    trades = len(rows)
+    wins = sum(1 for row in rows if safe_float(row.get("return_pct")) > 0)
+    target_touch = sum(1 for row in rows if truthy(row.get("target_upper_touch")))
+    target_sellable = sum(1 for row in rows if truthy(row.get("target_upper_sellable_hit")))
+    first_manage_touch = sum(1 for row in rows if truthy(row.get("first_manage_touch")))
+    first_manage_sellable = sum(1 for row in rows if truthy(row.get("first_manage_hit")))
+    returns = [safe_float(row.get("return_pct")) for row in rows]
+    return {
+        "sample_size": trades,
+        "target_upper_touch_rate_pct": rate(target_touch, trades),
+        "target_upper_sellable_hit_rate_pct": rate(target_sellable, trades),
+        "first_manage_touch_rate_pct": rate(first_manage_touch, trades),
+        "first_manage_sellable_hit_rate_pct": rate(first_manage_sellable, trades),
+        "win_rate_pct": rate(wins, trades),
+        "avg_return_pct": round(sum(returns) / trades, 4) if trades else 0.0,
+    }
+
+
+def build_hit_rate_bucket_rows(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sells = [row for row in ledger if row.get("action") == "SELL"]
+    periods = sorted({str(row.get("period", "")) for row in sells}, key=period_sort_key)
+    rows: list[dict[str, Any]] = []
+    for period in periods:
+        period_sells = [row for row in sells if row.get("period") == period]
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in period_sells:
+            queries = candidate_bucket_queries(
+                market_state=row.get("market_state"),
+                setup_type=row.get("setup_type"),
+                score=row.get("score"),
+                traded_value_ratio=row.get("traded_value_ratio"),
+                atr_pct=row.get("atr_pct"),
+                momentum_10d_pct=row.get("momentum_10d_pct"),
+                sector_group=row.get("sector_group"),
+            )
+            for bucket_type, criteria in queries:
+                if bucket_type == "overall":
+                    continue
+                key = bucket_key(criteria)
+                group = grouped.setdefault(
+                    (bucket_type, key),
+                    {
+                        "period": period,
+                        "bucket_type": bucket_type,
+                        "bucket_key": key,
+                        "bucket_label": bucket_label(criteria),
+                        "criteria": criteria,
+                        "rows": [],
+                    },
+                )
+                group["rows"].append(row)
+        priority = {bucket_type: index for index, (bucket_type, _fields) in enumerate(BUCKET_PRIORITY)}
+        for group in sorted(grouped.values(), key=lambda item: (priority.get(str(item["bucket_type"]), 999), str(item["bucket_key"]))):
+            item = hit_rate_item_from_rows(group.pop("rows"))
+            group.update(item)
+            group["sample_warning"] = "low_sample" if int(group["sample_size"]) < MIN_BUCKET_SAMPLE_SIZE else ""
+            rows.append(group)
+    return rows
+
+
 def build_sell_path_summary_rows(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sells = [row for row in ledger if row.get("action") == "SELL"]
     periods = sorted({str(row.get("period", "")) for row in sells}, key=period_sort_key)
@@ -975,6 +1076,7 @@ def write_sell_path_outputs(out_dir: Path, prefix: str, ledger: list[dict[str, A
 
 def write_hit_rate_calibration_outputs(out_dir: Path, prefix: str, ledger: list[dict[str, Any]]) -> dict[str, Path]:
     summary_rows = build_sell_path_summary_rows(ledger)
+    bucket_rows = build_hit_rate_bucket_rows(ledger)
     csv_path = out_dir / f"{prefix}_hit_rate_calibration.csv"
     json_path = out_dir / f"{prefix}_hit_rate_calibration.json"
     latest_json_path = out_dir / "latest_hit_rate_calibration.json"
@@ -990,9 +1092,12 @@ def write_hit_rate_calibration_outputs(out_dir: Path, prefix: str, ledger: list[
             writer.writeheader()
             writer.writerows(calibration_rows)
     payload: dict[str, Any] = {
+        "schema": 2,
         "source_prefix": prefix,
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "default_period": "12M",
+        "min_bucket_sample_size": MIN_BUCKET_SAMPLE_SIZE,
+        "bucket_priority": [bucket_type for bucket_type, _fields in BUCKET_PRIORITY],
         "periods": {},
     }
     for row in calibration_rows:
@@ -1011,13 +1116,32 @@ def write_hit_rate_calibration_outputs(out_dir: Path, prefix: str, ledger: list[
             period_data["overall"] = item
         elif row["group_type"] == "market_state":
             period_data["market_state"][str(row["group_value"])] = item
+    for row in bucket_rows:
+        period = str(row["period"])
+        period_data = payload["periods"].setdefault(period, {"overall": None, "market_state": {}, "buckets": []})
+        period_data.setdefault("buckets", []).append(
+            {
+                "bucket_type": row["bucket_type"],
+                "bucket_key": row["bucket_key"],
+                "bucket_label": row["bucket_label"],
+                "criteria": row["criteria"],
+                "sample_size": int(row["sample_size"]),
+                "target_upper_touch_rate_pct": row["target_upper_touch_rate_pct"],
+                "target_upper_sellable_hit_rate_pct": row["target_upper_sellable_hit_rate_pct"],
+                "first_manage_touch_rate_pct": row["first_manage_touch_rate_pct"],
+                "first_manage_sellable_hit_rate_pct": row["first_manage_sellable_hit_rate_pct"],
+                "win_rate_pct": row["win_rate_pct"],
+                "avg_return_pct": row["avg_return_pct"],
+                "sample_warning": row["sample_warning"],
+            }
+        )
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     json_path.write_text(text + "\n", encoding="utf-8")
     latest_json_path.write_text(text + "\n", encoding="utf-8")
     lines = [
         f"# Hit Rate Calibration - {prefix}",
         "",
-        "The live monitor should use the 12M market-state row when available, then fall back to the 12M overall row.",
+        f"The live monitor should use the most specific 12M bucket with at least `{MIN_BUCKET_SAMPLE_SIZE}` samples, then fall back through coarser buckets and finally the 12M overall row.",
         "",
         "| Period | Group | Value | Samples | Target Touch% | Target Sellable% | First Manage% | Win% | Avg Return% |",
         "|---|---|---|---:|---:|---:|---:|---:|---:|",
@@ -1025,6 +1149,19 @@ def write_hit_rate_calibration_outputs(out_dir: Path, prefix: str, ledger: list[
     for row in calibration_rows:
         lines.append(
             f"| {row['period']} | {row['group_type']} | {row['group_value']} | {row['closed_trades']} | {row['target_upper_touch_rate_pct']:.2f} | {row['target_upper_sellable_hit_rate_pct']:.2f} | {row['first_manage_sellable_hit_rate_pct']:.2f} | {row['win_rate_pct']:.2f} | {row['avg_return_pct']:.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Buckets",
+            "",
+            "| Period | Bucket Type | Bucket | Samples | Target Touch% | Target Sellable% | First Manage% | Win% | Avg Return% | Warning |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for row in bucket_rows:
+        lines.append(
+            f"| {row['period']} | {row['bucket_type']} | {row['bucket_label']} | {row['sample_size']} | {row['target_upper_touch_rate_pct']:.2f} | {row['target_upper_sellable_hit_rate_pct']:.2f} | {row['first_manage_sellable_hit_rate_pct']:.2f} | {row['win_rate_pct']:.2f} | {row['avg_return_pct']:.2f} | {row['sample_warning']} |"
         )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {
@@ -1464,6 +1601,13 @@ def append_ledger_row(
             "market_state": features.get("market_state", ""),
             "score": round(planned.score, 4),
             "setup_type": planned.setup_type,
+            "position_sizing_mode": features.get("position_sizing_mode", ""),
+            "position_quality_score": features.get("position_quality_score", ""),
+            "position_quality_grade": features.get("position_quality_grade", ""),
+            "position_capital_factor": features.get("position_capital_factor", ""),
+            "target_capital_pct": features.get("target_capital_pct", ""),
+            "actual_capital_pct": features.get("actual_capital_pct", ""),
+            "position_sizing_reason": features.get("position_sizing_reason", ""),
             "entry_time": features.get("entry_time", ""),
             "exit_time": features.get("exit_time", ""),
             "entry_gap_pct": features.get("entry_gap_pct", ""),
@@ -1625,18 +1769,39 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
                 capital *= max(0.0, min(1.0, args.regime_risk_factor))
             if capital <= 0:
                 continue
-            capital *= effective_market_capital_factor(str(temperature["state"]), aggressive_active, args)
+            market_factor = effective_market_capital_factor(str(temperature["state"]), aggressive_active, args)
+            capital *= market_factor
             capital *= dd_capital_factor
             if capital <= 0:
                 if dd_governor_active:
                     drawdown_governor_hits += 1
                 continue
+            equity_before_buy = marked_equity(cash, open_positions, bar_maps, date_value, args)
+            sizing = sizing_result_for_trade(planned, max_positions_for_day, market_factor, dd_capital_factor, args)
+            capital *= sizing.capital_factor
+            if float(args.max_single_position_pct) > 0 and equity_before_buy > 0:
+                capital = min(capital, equity_before_buy * float(args.max_single_position_pct) / 100)
+            target_capital_pct = capital / equity_before_buy * 100 if equity_before_buy > 0 else 0.0
             shares, total_cost, buy_fee = max_affordable_lot_shares(capital, planned.entry_price, args)
             if shares <= 0:
                 skipped_no_lot += 1
                 continue
             if dd_governor_active:
                 drawdown_governor_hits += 1
+            actual_capital_pct = total_cost / equity_before_buy * 100 if equity_before_buy > 0 else 0.0
+            planned = replace(
+                planned,
+                features={
+                    **planned.features,
+                    "position_sizing_mode": sizing.mode,
+                    "position_quality_score": sizing.quality_score,
+                    "position_quality_grade": sizing.quality_grade,
+                    "position_capital_factor": sizing.capital_factor,
+                    "target_capital_pct": round(target_capital_pct, 4),
+                    "actual_capital_pct": round(actual_capital_pct, 4),
+                    "position_sizing_reason": sizing.reason,
+                },
+            )
             cash -= total_cost
             open_positions.append(
                 OpenPosition(
@@ -1651,7 +1816,8 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
             equity = marked_equity(cash, open_positions, bar_maps, date_value, args)
             dd_note = f"; dd_factor={dd_capital_factor:.2f}; dd={dd_fraction:.2%}" if dd_governor_active else ""
             aggressive_note = f"; cushion_mode=aggressive; cushion_return={cushion_return:.2%}" if aggressive_active else ""
-            append_ledger_row(ledger, period, date_value, "BUY", planned, shares, planned.entry_price, buy_fee, cash, equity, f"score={planned.score:.1f}; market={temperature['state']}{dd_note}{aggressive_note}")
+            sizing_note = f"; sizing={sizing.mode}; q={sizing.quality_score:.2f}; cap_factor={sizing.capital_factor:.2f}; actual_cap={actual_capital_pct:.2f}%"
+            append_ledger_row(ledger, period, date_value, "BUY", planned, shares, planned.entry_price, buy_fee, cash, equity, f"score={planned.score:.1f}; market={temperature['state']}{dd_note}{aggressive_note}{sizing_note}")
 
         still_open: list[OpenPosition] = []
         for position in open_positions:
@@ -1745,6 +1911,12 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
     partial_rows = [row for row in ledger if row.get("action") == "PARTIAL_SELL"]
     partial_pnl = sum(float(row.get("realized_pnl") or 0.0) for row in partial_rows)
     remaining_pnl = sum(float(row.get("realized_pnl") or 0.0) for row in ledger if row.get("action") == "SELL")
+    buy_rows = [row for row in ledger if row.get("action") == "BUY"]
+
+    def average_buy_field(field: str) -> float:
+        values = [float(row.get(field) or 0.0) for row in buy_rows if row.get(field) not in {"", None}]
+        return round(sum(values) / len(values), 4) if values else 0.0
+
     summary = {
         "period": period,
         "start_date": trading_dates[0].isoformat() if trading_dates else start_date.isoformat(),
@@ -1782,6 +1954,13 @@ def simulate_period(period: str, planned_by_entry: dict[dt.date, list[PlannedTra
         "profit_cushion_normal_capital_factor": args.profit_cushion_normal_capital_factor,
         "profit_cushion_cold_capital_factor": args.profit_cushion_cold_capital_factor,
         "profit_cushion_aggressive_days": profit_cushion_aggressive_days,
+        "position_sizing_mode": args.position_sizing_mode,
+        "quality_capital_min_factor": args.quality_capital_min_factor,
+        "quality_capital_max_factor": args.quality_capital_max_factor,
+        "max_single_position_pct": args.max_single_position_pct,
+        "avg_position_quality_score": average_buy_field("position_quality_score"),
+        "avg_position_capital_factor": average_buy_field("position_capital_factor"),
+        "avg_actual_capital_pct": average_buy_field("actual_capital_pct"),
         "partial_take_profit": args.partial_take_profit,
         "first_manage_ratio": args.first_manage_ratio,
         "first_manage_min": args.first_manage_min,
@@ -1817,6 +1996,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--period-months", default="1,3,6")
     parser.add_argument("--initial-cash", type=float, default=100000.0)
     parser.add_argument("--max-positions", type=int, default=3)
+    parser.add_argument("--position-sizing-mode", choices=["equal", "score_linear", "edge_linear", "quality"], default="quality")
+    parser.add_argument("--quality-capital-min-factor", type=float, default=0.70)
+    parser.add_argument("--quality-capital-max-factor", type=float, default=1.40)
+    parser.add_argument("--max-single-position-pct", type=float, default=0.0, help="disabled at 0; cap new-entry budget as a percentage of equity before buy")
     parser.add_argument("--min-score", type=float, default=90.0)
     parser.add_argument("--selection-mode", choices=["score", "score_quality", "quality", "score_low_heat"], default="score")
     parser.add_argument("--setups", default="VOLUME_BREAKOUT,HIGH_VOLATILITY")
@@ -1907,8 +2090,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hot-capital-factor", type=float, default=0.0)
     parser.add_argument("--normal-capital-factor", type=float, default=1.0)
     parser.add_argument("--cold-capital-factor", type=float, default=1.0)
-    parser.add_argument("--equity-drawdown-capital-threshold", type=float, default=0.0, help="disabled at 0; reduce new-entry capital when current equity drawdown reaches this fraction")
-    parser.add_argument("--equity-drawdown-capital-factor", type=float, default=1.0, help="capital multiplier for new entries while the equity drawdown governor is active")
+    parser.add_argument("--equity-drawdown-capital-threshold", type=float, default=0.035, help="disabled at 0; reduce new-entry capital when current equity drawdown reaches this fraction")
+    parser.add_argument("--equity-drawdown-capital-factor", type=float, default=0.75, help="capital multiplier for new entries while the equity drawdown governor is active")
     parser.add_argument("--profit-cushion-aggressive-threshold", type=float, default=0.08, help="disabled at 0; enable aggressive sizing after current equity return reaches this fraction")
     parser.add_argument("--profit-cushion-min-trading-days", type=int, default=120, help="minimum elapsed trading days before profit-cushion aggressive mode can activate")
     parser.add_argument("--profit-cushion-max-positions", type=int, default=2, help="max positions while profit-cushion aggressive mode is active; 0 keeps the base max")

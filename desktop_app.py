@@ -69,7 +69,7 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
     raise SystemExit("PySide6 is required. Install dependencies or use the packaged EXE.") from exc
 
 
-ADVICE_COLUMNS = ["方向", "动作", "状态", "代码", "名称", "最新", "触发/成本", "目标上沿", "第一管理线", "移动止盈", "止损", "VWAP/成本", "可卖上沿", "触及上沿", "管理线", "样本数", "盈亏", "Edge", "理由"]
+ADVICE_COLUMNS = ["方向", "动作", "状态", "代码", "名称", "最新", "触发/成本", "建议资金", "质量", "目标上沿", "第一管理线", "移动止盈", "止损", "VWAP/成本", "可卖上沿", "触及上沿", "管理线", "样本数", "样本桶", "盈亏", "Edge", "理由"]
 POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标上沿", "止损", "回撤%", "最高", "管理状态", "状态", "备注"]
 REPOSITORY = "Sulfoxide319/Stocks"
 AUTOSTART_VALUE_NAME = "StocksTradingAssistant"
@@ -904,15 +904,18 @@ class MainWindow(QMainWindow):
                 item.get("name", ""),
                 self._fmt(item.get("latest_price")),
                 self._fmt(item.get("buy_price") if side == "卖出" else item.get("effective_trigger_price", item.get("trigger_price"))),
+                f"{self._fmt(item.get('suggested_capital_pct'))}%" if side == "买入" else "",
+                f"{item.get('position_quality_grade', '')}/{self._fmt(item.get('position_quality_score'))}" if side == "买入" else "",
                 self._fmt(item.get("target_price")),
                 self._fmt(item.get("first_manage_price")),
                 self._fmt(item.get("trailing_stop_price")) if side == "卖出" else "",
                 self._fmt(item.get("hard_stop_price")),
                 self._fmt(item.get("vwap_fail_price")) if side == "卖出" else "",
-                f"{self._fmt(item.get('target_upper_hit_rate_pct'))}%" if side == "买入" and item.get("target_upper_hit_rate_pct") not in {None, ""} else "",
-                f"{self._fmt(item.get('target_upper_touch_rate_pct'))}%" if side == "买入" and item.get("target_upper_touch_rate_pct") not in {None, ""} else "",
-                f"{self._fmt(item.get('first_manage_hit_rate_pct'))}%" if side == "买入" and item.get("first_manage_hit_rate_pct") not in {None, ""} else "",
+                self._hit_rate_fmt(item.get("target_upper_hit_rate_pct")) if side == "买入" else "",
+                self._hit_rate_fmt(item.get("target_upper_touch_rate_pct")) if side == "买入" else "",
+                self._hit_rate_fmt(item.get("first_manage_hit_rate_pct")) if side == "买入" else "",
                 self._fmt(item.get("hit_rate_sample_size")) if side == "买入" else "",
+                item.get("hit_rate_bucket", "") if side == "买入" else "",
                 self._fmt(item.get("pnl_pct")) if side == "卖出" else "",
                 self._fmt(item.get("edge_score")) if side == "买入" else "",
                 item.get("reason", ""),
@@ -931,7 +934,7 @@ class MainWindow(QMainWindow):
         if not items:
             return {}
         row = items[0].row()
-        keys = ["side", "action", "management_state", "ticker", "name", "latest_price", "trigger_price", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "target_upper_hit_rate", "target_upper_touch_rate", "first_manage_hit_rate", "hit_rate_sample_size", "pnl_pct", "edge_score", "reason"]
+        keys = ["side", "action", "management_state", "ticker", "name", "latest_price", "trigger_price", "suggested_capital_pct", "position_quality", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "target_upper_hit_rate", "target_upper_touch_rate", "first_manage_hit_rate", "hit_rate_sample_size", "hit_rate_bucket", "pnl_pct", "edge_score", "reason"]
         values: dict[str, str] = {}
         for column, key in enumerate(keys):
             item = self.advice_table.item(row, column)
@@ -945,11 +948,12 @@ class MainWindow(QMainWindow):
         self.detail_label.setText(
             f"{row.get('side', '')} {row.get('action', '')} {row.get('ticker', '')} {row.get('name', '')}；"
             f"状态 {row.get('management_state', '')}，最新 {row.get('latest_price', '')}，触发/成本 {row.get('trigger_price', '')}，"
+            f"建议资金 {row.get('suggested_capital_pct', '')}，质量 {row.get('position_quality', '')}，"
             f"目标上沿 {row.get('target_price', '')}，第一管理线 {row.get('first_manage_price', '')}，"
             f"移动止盈 {row.get('trailing_stop_price', '')}，止损 {row.get('hard_stop_price', '')}，"
             f"VWAP/成本 {row.get('vwap_fail_price', '')}，可卖上沿 {row.get('target_upper_hit_rate', '')}，"
             f"触及上沿 {row.get('target_upper_touch_rate', '')}，管理线 {row.get('first_manage_hit_rate', '')}，"
-            f"样本数 {row.get('hit_rate_sample_size', '')}。"
+            f"样本数 {row.get('hit_rate_sample_size', '')}，样本桶 {row.get('hit_rate_bucket', '')}。"
         )
         if row.get("side") == "买入":
             self.fill_quick_position_from_selection()
@@ -1361,6 +1365,15 @@ class MainWindow(QMainWindow):
             return f"{float(value):.2f}"
         except (TypeError, ValueError):
             return "" if value is None else str(value)
+
+    @staticmethod
+    def _hit_rate_fmt(value: object) -> str:
+        if value in {None, ""}:
+            return "样本不足"
+        try:
+            return f"{float(value):.2f}%"
+        except (TypeError, ValueError):
+            return str(value)
 
     @staticmethod
     def _float(value: object, default: float = 0.0) -> float:

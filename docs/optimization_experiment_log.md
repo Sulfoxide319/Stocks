@@ -2,6 +2,27 @@
 
 This log records sensitivity checks that did not become default trading logic. The goal is to avoid repeating plausible but rejected changes and to keep the optimization loop evidence-based.
 
+## 2026-07-05 v0.4.41 Position Sizing Search
+
+Baseline: `v0.4.40` trading logic, strict 10-minute engine, no events, end date `2026-07-03`.
+
+### Root Observation
+
+The previous default ranked candidates by quality but allocated capital mostly by remaining slots. That meant stock quality changed order, not position size. A pure Edge-sizing variant improved returns but raised 12M drawdown above the default. The accepted solution adds a drawdown governor and allows composite quality to lift capital only when traded-value confirmation is strong.
+
+### Sizing Comparison
+
+| Scenario | Change | 1M | 3M | 6M | 9M | 12M | 12M DD | 12M PF | Decision |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `equal` | Previous slot allocation | 13.7512% | 41.5900% | 64.9549% | 71.2338% | 72.3845% | 7.2032% | 3.1659 | Baseline |
+| `score_linear` | Capital factor from raw score only | 14.6623% | 44.9802% | 70.2950% | 81.1639% | 81.8773% | 7.2945% | 3.2817 | Reject: weaker than Edge/quality |
+| `edge_linear` | Capital factor from Edge only | 15.4827% | 45.5629% | 73.0079% | 82.6328% | 84.8956% | 7.9227% | 3.2552 | Reject: strong returns but DD too high |
+| `quality_max135` | Edge floor + traded-value quality uplift | 16.4597% | 48.8537% | 76.5900% | 90.6688% | 91.8779% | 8.0428% | 3.2990 | Reject: returns strong but DD too high |
+| `quality_max140` | Wider quality factor | 16.4857% | 49.4165% | 79.5564% | 91.4391% | 92.6371% | 8.2774% | 3.2731 | Reject: highest return but excessive DD |
+| `quality_max140_dd035_f075` | Wider quality factor plus 3.5% drawdown governor at 0.75x new-entry capital | 16.7714% | 49.1110% | 76.6191% | 86.8375% | 88.4358% | 7.0904% | 3.3479 | Accept: beats equal/score/Edge in all windows and lowers 12M DD vs baseline |
+
+Hard checks for accepted candidate: `bad_300_301=0`, `bad_lots=0`, `bad_tick=0`.
+
 ## 2026-07-04 v0.4.38 Follow-Up
 
 Baseline: `v0.4.38`, strict 10-minute engine, no events, end date `2026-07-03`.

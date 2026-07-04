@@ -109,11 +109,18 @@ class BuyAdvice:
     target_pct: float
     first_manage_pct: float
     hard_stop_pct: float
-    target_upper_hit_rate_pct: float
-    target_upper_touch_rate_pct: float
-    first_manage_hit_rate_pct: float
+    target_upper_hit_rate_pct: float | None
+    target_upper_touch_rate_pct: float | None
+    first_manage_hit_rate_pct: float | None
     hit_rate_sample_size: int
     hit_rate_source: str
+    hit_rate_bucket: str
+    hit_rate_warning: str
+    position_quality_score: float
+    position_quality_grade: str
+    capital_factor: float
+    suggested_capital_pct: float
+    capital_reason: str
     edge_score: float
     reason: str
     buy_enabled: bool = True
@@ -183,6 +190,19 @@ def parse_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def parse_optional_float(value: object) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_rate_pct(value: float | None) -> str:
+    return "样本不足" if value is None else f"{value:.1f}%"
 
 
 def clean_text(value: object) -> str:
@@ -265,20 +285,24 @@ def transition_management_state(
 
 def target_context_note(
     first_manage_price: float,
-    target_hit_rate: float,
-    first_manage_hit_rate: float,
+    target_hit_rate: float | None,
+    first_manage_hit_rate: float | None,
     buy_enabled: bool,
-    target_touch_rate: float = 0.0,
+    target_touch_rate: float | None = None,
     sample_size: int = 0,
     source: str = "",
+    bucket: str = "",
+    warning: str = "",
 ) -> str:
     if first_manage_price <= 0:
         return ""
     if not buy_enabled:
         return "；观察池不按目标价交易"
-    sample_note = f"N={sample_size}" if sample_size > 0 else "默认"
-    source_note = "分状态校准" if source.startswith("calibration_12M_") and not source.endswith("overall") else "整体校准" if source == "calibration_12M_overall" else "回退默认"
-    return f"；目标价是上沿，不是承诺价，先看{first_manage_price:.2f}管理线；12M样本({sample_note},{source_note}) 可卖上沿{target_hit_rate:.1f}%/触及上沿{target_touch_rate:.1f}%/管理线{first_manage_hit_rate:.1f}%"
+    if sample_size <= 0 or target_hit_rate is None or target_touch_rate is None or first_manage_hit_rate is None:
+        suffix = f"，原因={warning}" if warning else ""
+        return f"；目标价是上沿，不是承诺价，先看{first_manage_price:.2f}管理线；历史相似样本不足，暂不展示命中率{suffix}"
+    bucket_note = bucket or source or "overall"
+    return f"；目标价是上沿，不是承诺价，先看{first_manage_price:.2f}管理线；12M真实样本(N={sample_size}, {bucket_note}) 可卖上沿{target_hit_rate:.1f}%/触及上沿{target_touch_rate:.1f}%/管理线{first_manage_hit_rate:.1f}%"
 
 
 def phase_for_time(now: dt.datetime) -> str:
@@ -450,11 +474,18 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         target_price = ref_price * (1 + target_pct / 100) if ref_price else 0.0
         first_manage_pct = parse_float(row.get("first_manage_pct"), first_manage_pct_from_target(target_pct))
         first_manage_price = ref_price * (1 + first_manage_pct / 100) if ref_price else 0.0
-        target_upper_hit_rate = parse_float(row.get("target_upper_hit_rate_pct"), 3.54)
-        target_upper_touch_rate = parse_float(row.get("target_upper_touch_rate_pct"), target_upper_hit_rate)
-        first_manage_hit_rate = parse_float(row.get("first_manage_hit_rate_pct"), 35.4)
+        target_upper_hit_rate = parse_optional_float(row.get("target_upper_hit_rate_pct"))
+        target_upper_touch_rate = parse_optional_float(row.get("target_upper_touch_rate_pct"))
+        first_manage_hit_rate = parse_optional_float(row.get("first_manage_hit_rate_pct"))
         hit_rate_sample_size = int(parse_float(row.get("hit_rate_sample_size"), 0.0))
         hit_rate_source = row.get("hit_rate_source", "") or "fallback"
+        hit_rate_bucket = row.get("hit_rate_bucket", "") or ""
+        hit_rate_warning = row.get("hit_rate_warning", "") or ""
+        position_quality_score = parse_float(row.get("position_quality_score"), 0.0)
+        position_quality_grade = row.get("position_quality_grade", "") or ""
+        capital_factor = parse_float(row.get("capital_factor"), 1.0)
+        suggested_capital_pct = parse_float(row.get("suggested_capital_pct"), 0.0)
+        capital_reason = row.get("capital_reason", "") or ""
         hard_stop_price = ref_price * (1 - stop_pct / 100) if ref_price else 0.0
         if action == "DATA_UNAVAILABLE":
             priority = 9
@@ -498,7 +529,19 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
             final_action = "NO_BUY"
             buy_enabled = False
             reason = row.get("risks", "") or action or "未通过盘中执行过滤"
-        reason = f"{reason}{target_context_note(first_manage_price, target_upper_hit_rate, first_manage_hit_rate, buy_enabled, target_upper_touch_rate, hit_rate_sample_size, hit_rate_source)}"
+        if buy_enabled and suggested_capital_pct <= 0 and ("暂停新开仓" in capital_reason or row.get("market_state", "") == "hot"):
+            buy_enabled = False
+            reason = f"{reason}；资金风控暂停买入"
+        if not buy_enabled:
+            suggested_capital_pct = 0.0
+        capital_note = (
+            f"；建议资金占比{suggested_capital_pct:.1f}%，质量{position_quality_grade or '-'}({position_quality_score:.2f})，仓位因子{capital_factor:.2f}"
+            if buy_enabled and suggested_capital_pct > 0
+            else "；观察/数据不足/分数不足，不提示投入资金"
+        )
+        if capital_reason:
+            capital_note += f"；仓位依据：{capital_reason}"
+        reason = f"{reason}{target_context_note(first_manage_price, target_upper_hit_rate, first_manage_hit_rate, buy_enabled, target_upper_touch_rate, hit_rate_sample_size, hit_rate_source, hit_rate_bucket, hit_rate_warning)}{capital_note}"
         advices.append(
             BuyAdvice(
                 ticker=row.get("ticker", ""),
@@ -519,6 +562,13 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
                 first_manage_hit_rate_pct=first_manage_hit_rate,
                 hit_rate_sample_size=hit_rate_sample_size,
                 hit_rate_source=hit_rate_source,
+                hit_rate_bucket=hit_rate_bucket,
+                hit_rate_warning=hit_rate_warning,
+                position_quality_score=position_quality_score,
+                position_quality_grade=position_quality_grade,
+                capital_factor=capital_factor,
+                suggested_capital_pct=suggested_capital_pct,
+                capital_reason=capital_reason,
                 edge_score=parse_float(row.get("edge_score")),
                 reason=reason,
                 buy_enabled=buy_enabled,
@@ -715,12 +765,13 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
             "",
             "## 再看买入",
             "",
-            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 目标上沿 | 第一管理线 | 止损价 | 可卖上沿 | 触及上沿 | 管理线 | N | Edge | 理由 |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 建议资金 | 质量 | 目标上沿 | 第一管理线 | 止损价 | 可卖上沿 | 触及上沿 | 管理线 | N | 样本桶 | Edge | 理由 |",
+            "|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
         ]
     )
     for item in buy_advices[:20]:
-        lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.latest_price:.2f} | {item.trigger_price:.2f} | {item.vwap:.2f} | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.hard_stop_price:.2f} | {item.target_upper_hit_rate_pct:.1f}% | {item.target_upper_touch_rate_pct:.1f}% | {item.first_manage_hit_rate_pct:.1f}% | {item.hit_rate_sample_size} | {item.edge_score:.2f} | {item.reason} |")
+        quality_text = f"{item.position_quality_grade or '-'}/{item.position_quality_score:.2f}"
+        lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.latest_price:.2f} | {item.trigger_price:.2f} | {item.vwap:.2f} | {item.suggested_capital_pct:.1f}% | {quality_text} | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.hard_stop_price:.2f} | {format_rate_pct(item.target_upper_hit_rate_pct)} | {format_rate_pct(item.target_upper_touch_rate_pct)} | {format_rate_pct(item.first_manage_hit_rate_pct)} | {item.hit_rate_sample_size} | {item.hit_rate_bucket or '-'} | {item.edge_score:.2f} | {item.reason} |")
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
@@ -736,13 +787,13 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "management_state", "previous_management_state", "target_upper_hit_rate_pct", "target_upper_touch_rate_pct", "first_manage_hit_rate_pct", "hit_rate_sample_size", "hit_rate_source", "pnl_pct", "signal_points", "reason"]
+        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "suggested_capital_pct", "position_quality_score", "position_quality_grade", "capital_factor", "capital_reason", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "management_state", "previous_management_state", "target_upper_hit_rate_pct", "target_upper_touch_rate_pct", "first_manage_hit_rate_pct", "hit_rate_sample_size", "hit_rate_source", "hit_rate_bucket", "hit_rate_warning", "pnl_pct", "signal_points", "reason"]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for item in sell_advices:
-            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": item.trailing_stop_price, "hard_stop_price": item.hard_stop_price, "vwap_fail_price": item.vwap_fail_price, "management_state": item.management_state, "previous_management_state": item.previous_management_state, "target_upper_hit_rate_pct": "", "target_upper_touch_rate_pct": "", "first_manage_hit_rate_pct": "", "hit_rate_sample_size": "", "hit_rate_source": "", "pnl_pct": item.pnl_pct, "signal_points": item.signal_points, "reason": item.reason})
+            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "suggested_capital_pct": "", "position_quality_score": "", "position_quality_grade": "", "capital_factor": "", "capital_reason": "", "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": item.trailing_stop_price, "hard_stop_price": item.hard_stop_price, "vwap_fail_price": item.vwap_fail_price, "management_state": item.management_state, "previous_management_state": item.previous_management_state, "target_upper_hit_rate_pct": "", "target_upper_touch_rate_pct": "", "first_manage_hit_rate_pct": "", "hit_rate_sample_size": "", "hit_rate_source": "", "hit_rate_bucket": "", "hit_rate_warning": "", "pnl_pct": item.pnl_pct, "signal_points": item.signal_points, "reason": item.reason})
         for item in buy_advices:
-            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": "", "hard_stop_price": item.hard_stop_price, "vwap_fail_price": "", "management_state": "", "previous_management_state": "", "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "target_upper_touch_rate_pct": item.target_upper_touch_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "hit_rate_sample_size": item.hit_rate_sample_size, "hit_rate_source": item.hit_rate_source, "pnl_pct": "", "signal_points": "", "reason": item.reason})
+            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "suggested_capital_pct": item.suggested_capital_pct, "position_quality_score": item.position_quality_score, "position_quality_grade": item.position_quality_grade, "capital_factor": item.capital_factor, "capital_reason": item.capital_reason, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": "", "hard_stop_price": item.hard_stop_price, "vwap_fail_price": "", "management_state": "", "previous_management_state": "", "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "target_upper_touch_rate_pct": item.target_upper_touch_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "hit_rate_sample_size": item.hit_rate_sample_size, "hit_rate_source": item.hit_rate_source, "hit_rate_bucket": item.hit_rate_bucket, "hit_rate_warning": item.hit_rate_warning, "pnl_pct": "", "signal_points": "", "reason": item.reason})
 
     shutil.copyfile(report, out_dir / "latest_plan.md")
     shutil.copyfile(json_path, out_dir / "latest_plan.json")
