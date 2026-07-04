@@ -7,9 +7,11 @@ import argparse
 import csv
 import datetime as dt
 import json
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -26,6 +28,8 @@ from app_storage import default_db_path, export_open_positions_csv, save_latest_
 
 MONITOR_DEFAULT_ARGS = [
     "--dynamic-params",
+    "--history-timeout",
+    "5",
     "--max-gap-up",
     "0.02",
     "--gap-volume-threshold",
@@ -39,15 +43,15 @@ MONITOR_DEFAULT_ARGS = [
     "--max-close-position-20d-pct",
     "85",
     "--cold-max-gap-up",
-    "-1",
+    "0.01",
     "--cold-gap-volume-min-ratio",
-    "99",
+    "1.5",
     "--cold-max-5d-range-pct",
-    "1",
+    "25",
     "--cold-max-momentum-10d-pct",
-    "1",
+    "20",
     "--cold-max-close-position-20d-pct",
-    "1",
+    "80",
 ]
 
 
@@ -86,7 +90,7 @@ class SellAdvice:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local 2-minute A-share buy/sell assistant.")
-    parser.add_argument("--watchlist", default="config/watchlist.buyable_600_300_301_liquid.csv")
+    parser.add_argument("--watchlist", default="config/watchlist.mainboard_liquid.csv")
     parser.add_argument("--positions", default="config/live_positions.csv")
     parser.add_argument("--out-dir", default="output/trading_assistant")
     parser.add_argument("--python", default=sys.executable)
@@ -167,13 +171,49 @@ def run_command_with_heartbeat(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        bufsize=1,
     )
+    output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    def read_stream(name: str, stream: object) -> None:
+        if stream is None:
+            return
+        for raw_line in stream:  # type: ignore[union-attr]
+            output_queue.put((name, str(raw_line).rstrip()))
+
+    stdout_thread = threading.Thread(target=read_stream, args=("stdout", process.stdout), daemon=True)
+    stderr_thread = threading.Thread(target=read_stream, args=("stderr", process.stderr), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    def drain_output() -> None:
+        while True:
+            try:
+                name, line = output_queue.get_nowait()
+            except queue.Empty:
+                return
+            if name == "stdout":
+                stdout_lines.append(line)
+            else:
+                stderr_lines.append(line)
+            if line.startswith("MONITOR_PROGRESS|"):
+                emit_progress(30, line.split("|", 1)[1])
+            elif name == "stderr" and line.strip():
+                emit_progress(30, f"候选股扫描错误输出：{line[:180]}")
+
     while process.poll() is None:
+        drain_output()
         now = time.monotonic()
         elapsed = int(now - started)
         if elapsed >= timeout_seconds:
             process.kill()
             stdout, stderr = process.communicate()
+            if stdout:
+                stdout_lines.append(stdout)
+            if stderr:
+                stderr_lines.append(stderr)
             raise subprocess.TimeoutExpired(command, timeout_seconds, output=stdout, stderr=stderr)
         if now - last_heartbeat >= heartbeat_seconds:
             percent = min(54, 30 + int(elapsed / max(timeout_seconds, 1) * 24))
@@ -181,6 +221,15 @@ def run_command_with_heartbeat(
             last_heartbeat = now
         time.sleep(0.2)
     stdout, stderr = process.communicate()
+    if stdout:
+        stdout_lines.append(stdout)
+    if stderr:
+        stderr_lines.append(stderr)
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+    drain_output()
+    stdout = "\n".join(line for line in stdout_lines if line)
+    stderr = "\n".join(line for line in stderr_lines if line)
     result = subprocess.CompletedProcess(command, int(process.returncode or 0), stdout, stderr)
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, command, output=stdout, stderr=stderr)
@@ -195,7 +244,7 @@ def run_monitor(args: argparse.Namespace, cwd: Path, today: dt.date, phase: str,
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     report = out_dir / f"monitor_{phase}_{stamp}.md"
     csv_path = out_dir / f"monitor_{phase}_{stamp}.csv"
-    mode = "daily" if phase == "opening" and dt.datetime.now().time() < dt.time(9, 30) else "intraday"
+    mode = "daily" if phase in {"postclose", "closed"} or (phase == "opening" and dt.datetime.now().time() < dt.time(9, 30)) else "intraday"
     command = [
         args.python,
         args.monitor_script,

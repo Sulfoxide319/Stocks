@@ -319,15 +319,20 @@ def edge_score(row: PatternRow, target_pct: float, stop_pct: float) -> float:
     return (probability * target_pct - (1 - probability) * stop_pct) * 100
 
 
+def monitor_progress(message: str) -> None:
+    print(f"MONITOR_PROGRESS|{message}", flush=True)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Monitor high expected-upside A-share short-term candidates.")
-    parser.add_argument("--watchlist", default="config/watchlist.buyable_600_300_301_liquid.csv")
+    parser.add_argument("--watchlist", default="config/watchlist.mainboard_liquid.csv")
     parser.add_argument("--allowed-prefixes", default=",".join(DEFAULT_BUYABLE_PREFIXES))
     parser.add_argument("--events", default="", help="event score JSON; defaults to today's tech_event_radar_YYYYMMDD.json, then latest dated file")
     parser.add_argument("--max-event-age-days", type=int, default=1, help="disable event scores when the dated event file is older than this many days")
     parser.add_argument("--quote-fallback", choices=["sina", "none"], default="sina", help="quote-only fallback when BaoStock 5m bars are unavailable")
     parser.add_argument("--today", default="")
     parser.add_argument("--lookback-days", type=int, default=160)
+    parser.add_argument("--history-timeout", type=float, default=8.0, help="seconds per Yahoo history request")
     parser.add_argument("--min-score", type=float, default=90)
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--min-traded-value", type=float, default=200_000_000)
@@ -372,19 +377,37 @@ def main() -> int:
 
     session = requests.Session()
     session.headers.update(DEFAULT_HEADERS)
+    monitor_progress("读取股票池")
     symbols = filter_symbols(load_watchlist(Path(args.watchlist)), args.allowed_prefixes)
+    monitor_progress(f"股票池读取完成：{len(symbols)} 只")
+    monitor_progress("读取事件评分")
     event_context = resolve_event_scores(args.events, today, args.max_event_age_days)
     event_scores = event_context.scores
     fetch_start = today - dt.timedelta(days=args.lookback_days)
     price_map: dict[str, list[PriceBar]] = {}
-    for symbol in symbols:
+    total_symbols = len(symbols)
+    for index, symbol in enumerate(symbols, start=1):
+        label = f"{symbol.ticker} {symbol.name}".strip()
+        monitor_progress(f"历史行情 {index}/{total_symbols}：{label}")
+        started = time.monotonic()
         try:
-            bars = fetch_yahoo_history(session, symbol.yahoo_symbol or symbol.ticker, fetch_start, today)
+            bars = fetch_yahoo_history(
+                session,
+                symbol.yahoo_symbol or symbol.ticker,
+                fetch_start,
+                today,
+                timeout_seconds=args.history_timeout,
+            )
             price_map[symbol.ticker] = [bar for bar in bars if bar.date <= today]
-        except Exception:
+            elapsed = time.monotonic() - started
+            if elapsed >= 2:
+                monitor_progress(f"历史行情偏慢：{label} 用时 {elapsed:.1f} 秒")
+        except Exception as exc:
             price_map[symbol.ticker] = []
+            monitor_progress(f"历史行情失败：{label} - {type(exc).__name__}: {exc}")
         time.sleep(0.02)
 
+    monitor_progress("计算板块和市场温度")
     sector_by_ticker = {symbol.ticker: infer_sector_group(getattr(symbol, "notes", ""), getattr(symbol, "name", "")) for symbol in symbols}
     sector_values: dict[str, list[tuple[float, bool]]] = {}
     for symbol in symbols:
@@ -416,8 +439,11 @@ def main() -> int:
     candidates: list[MonitorCandidate] = []
     entry_hour, entry_minute = (int(part) for part in args.entry_end_time.split(":", 1))
     entry_end = dt.time(entry_hour, entry_minute)
+    monitor_progress("筛选候选股并检查盘中数据")
     with BaoStock5mClient() as client:
-        for symbol in symbols:
+        for index, symbol in enumerate(symbols, start=1):
+            if index == 1 or index % 10 == 0:
+                monitor_progress(f"候选过滤 {index}/{total_symbols}：{symbol.ticker} {symbol.name}")
             bars = price_map.get(symbol.ticker, [])
             sector = sector_by_ticker.get(symbol.ticker, "other_tech")
             sector_momentum, sector_above = sector_context.get(sector, (0.0, 0.0))
@@ -451,6 +477,7 @@ def main() -> int:
             reasons: list[str] = []
             risks: list[str] = []
             if args.mode == "intraday":
+                monitor_progress(f"盘中数据：{row.ticker} {row.name}")
                 action, latest_price, vwap, intraday_time, trigger, reasons, risks = latest_intraday_state(
                     row.ticker,
                     today,
@@ -495,6 +522,7 @@ def main() -> int:
                 )
             )
 
+    monitor_progress(f"写入候选结果：{len(candidates)} 条")
     action_rank = {
         "BUY_TRIGGER": 4,
         "WATCH": 3,

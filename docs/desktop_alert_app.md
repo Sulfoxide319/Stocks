@@ -18,6 +18,13 @@ run_trading_app.bat
 
 ## What It Does
 
+- Automatic pre-open focus scan starts during `09:00-09:30` once per trading day.
+- Optional Windows startup registration keeps the desktop assistant running after sign-in.
+- During trading hours, the desktop app refreshes the latest scan candidates with lightweight real-time quotes.
+- Candidate trigger adjustment, near-threshold distance, normal interval, and fast interval are configurable in the left sidebar. Near-threshold candidates automatically switch monitoring to the fast interval.
+- The default near-threshold baseline is `0.25%`, with a dynamic lower bound of 3 A-share ticks. This is based on local mainboard 5-minute cache statistics where median 5-minute absolute movement was about `0.18%` and median 10-minute movement was about `0.24%`.
+- Buy triggers and urgent sell actions show a topmost popup, with same-day duplicate alerts suppressed.
+- The sidebar quick position entry writes ticker, buy price, and share count directly into the local SQLite position store.
 - Opening focus scan during `09:20-09:45`
 - 2-minute intraday buy/sell checks during `09:45-11:30` and `13:00-14:45`
 - Pre-close review during `14:45-15:05`

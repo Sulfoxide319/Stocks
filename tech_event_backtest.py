@@ -147,6 +147,7 @@ def fetch_yahoo_history(
     yahoo_symbol: str,
     start_date: dt.date,
     end_date: dt.date,
+    timeout_seconds: float = 30,
 ) -> list[PriceBar]:
     period1 = date_to_unix(start_date - dt.timedelta(days=90))
     period2 = date_to_unix(end_date + dt.timedelta(days=10))
@@ -158,7 +159,7 @@ def fetch_yahoo_history(
         "events": "history",
         "includeAdjustedClose": "true",
     }
-    response = session.get(url, params=params, headers=DEFAULT_HEADERS, timeout=30)
+    response = session.get(url, params=params, headers=DEFAULT_HEADERS, timeout=timeout_seconds)
     response.raise_for_status()
     payload = response.json()
     result = payload["chart"]["result"][0]

@@ -19,7 +19,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", default="output/live_advice")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--monitor-script", default="short_term_live_monitor.py")
-    parser.add_argument("--watchlist", default="config/watchlist.buyable_600_300_301_liquid.csv")
+    parser.add_argument("--watchlist", default="config/watchlist.mainboard_liquid.csv")
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--mode", choices=["intraday", "daily"], default="intraday")
     parser.add_argument("--today", default="")
@@ -94,15 +94,15 @@ def run_scan(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path]:
         "--max-close-position-20d-pct",
         "85",
         "--cold-max-gap-up",
-        "-1",
+        "0.01",
         "--cold-gap-volume-min-ratio",
-        "99",
+        "1.5",
         "--cold-max-5d-range-pct",
-        "1",
+        "25",
         "--cold-max-momentum-10d-pct",
-        "1",
+        "20",
         "--cold-max-close-position-20d-pct",
-        "1",
+        "80",
         "--out",
         str(report),
         "--csv-out",

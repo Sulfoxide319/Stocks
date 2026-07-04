@@ -55,6 +55,7 @@ Copy-Item -Force (Join-Path $Root "installer\Install-StocksTool.ps1") (Join-Path
 Copy-Item -Force (Join-Path $Root "installer\Update-StocksTool.ps1") (Join-Path $PackageRoot "Update-StocksTool.ps1")
 Copy-Item -Force (Join-Path $Root "installer\Start-TradingAssistant.bat") (Join-Path $PackageRoot "Start-TradingAssistant.bat")
 Copy-Item -Force (Join-Path $Root "VERSION") (Join-Path $PackageRoot "VERSION")
+Copy-Item -Recurse -Force (Join-Path $Root "config") (Join-Path $PackageRoot "config")
 
 & python -m pip install -r (Join-Path $Root "requirements.txt")
 if ($LASTEXITCODE -ne 0) {
@@ -144,6 +145,10 @@ foreach ($name in @("Update-StocksTool.ps1", "Start-TradingAssistant.bat", "VERS
     if (Test-Path $source) {
         $files += New-ManifestEntry -SourceBase $PackageRoot -SourcePath $source -TargetPath $name
     }
+}
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $PackageRoot "config") -Recurse -File) {
+    $target = Get-RelativePathText -Base $PackageRoot -Path $file.FullName
+    $files += New-ManifestEntry -SourceBase $PackageRoot -SourcePath $file.FullName -TargetPath $target
 }
 $updateManifest = [ordered]@{
     schema = 1

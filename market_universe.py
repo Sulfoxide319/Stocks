@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 
-DEFAULT_BUYABLE_PREFIXES = ("600", "300", "301")
+DEFAULT_BUYABLE_PREFIXES = ("000", "001", "002", "003", "600", "601", "603", "605")
 
 
 def parse_allowed_prefixes(raw: str | None) -> tuple[str, ...]:
