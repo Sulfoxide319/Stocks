@@ -91,6 +91,8 @@ MONITOR_DEFAULT_ARGS = [
     "80",
 ]
 
+DEFAULT_MONITOR_TIMEOUT_SECONDS = 15 * 60
+
 
 @dataclass
 class BuyAdvice:
@@ -157,6 +159,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--intraday-interval-seconds", type=int, default=120)
     parser.add_argument("--focus-interval-seconds", type=int, default=300)
     parser.add_argument("--postclose-interval-seconds", type=int, default=900)
+    parser.add_argument("--monitor-timeout-seconds", type=int, default=DEFAULT_MONITOR_TIMEOUT_SECONDS)
     parser.add_argument("--db", default="output/trading_assistant/trading_journal.sqlite")
     parser.add_argument("--app-db", default="")
     parser.add_argument("--use-app-db", action="store_true")
@@ -313,7 +316,7 @@ def run_command_with_heartbeat(
     command: list[str],
     cwd: Path,
     heartbeat_message: str,
-    timeout_seconds: int = 300,
+    timeout_seconds: int = DEFAULT_MONITOR_TIMEOUT_SECONDS,
     heartbeat_seconds: int = 5,
 ) -> subprocess.CompletedProcess[str]:
     started = time.monotonic()
@@ -417,7 +420,7 @@ def run_monitor(args: argparse.Namespace, cwd: Path, today: dt.date, phase: str,
         *args.extra_monitor_arg,
     ]
     emit_progress(25, "运行候选股扫描")
-    result = run_command_with_heartbeat(command, cwd, "候选股扫描运行中")
+    result = run_command_with_heartbeat(command, cwd, "候选股扫描运行中", timeout_seconds=args.monitor_timeout_seconds)
     if result.stdout.strip():
         print(result.stdout.strip())
     if result.stderr.strip():
