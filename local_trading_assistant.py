@@ -119,9 +119,12 @@ class SellAdvice:
     vwap: float
     target_price: float
     first_manage_price: float
+    trailing_stop_price: float
     hard_stop_price: float
+    vwap_fail_price: float
     highest_price: float
     pnl_pct: float
+    signal_points: str
     reason: str
 
 
@@ -173,6 +176,30 @@ def first_manage_price_from_position(buy_price: float, target_price: float) -> f
         return 0.0
     target_pct = (target_price / buy_price - 1) * 100
     return buy_price * (1 + first_manage_pct_from_target(target_pct) / 100)
+
+
+def sell_signal_points(
+    target_price: float,
+    first_manage_price: float,
+    trailing_stop_price: float,
+    hard_stop_price: float,
+    vwap: float,
+    vwap_fail_price: float,
+) -> str:
+    parts: list[str] = []
+    if target_price > 0:
+        parts.append(f"目标上沿{target_price:.2f}")
+    if first_manage_price > 0:
+        parts.append(f"第一管理线{first_manage_price:.2f}")
+    if trailing_stop_price > 0:
+        parts.append(f"移动止盈{trailing_stop_price:.2f}")
+    if hard_stop_price > 0:
+        parts.append(f"硬止损{hard_stop_price:.2f}")
+    if vwap_fail_price > 0:
+        parts.append(f"VWAP弱势<{vwap_fail_price:.2f}")
+    if vwap > 0:
+        parts.append(f"尾盘弱势14:45后<VWAP{vwap:.2f}且盈利<1.5%")
+    return "；".join(parts)
 
 
 def target_context_note(first_manage_price: float, target_hit_rate: float, first_manage_hit_rate: float, buy_enabled: bool) -> str:
@@ -473,18 +500,23 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
             if first_manage_price <= 0:
                 first_manage_price = first_manage_price_from_position(buy_price, target_price)
             latest, vwap, intraday_high, latest_time = latest_vwap_for_position(client, ticker, today)
+            vwap_fail_price = min(vwap, buy_price) if vwap > 0 and buy_price > 0 else 0.0
             if latest <= 0:
+                trailing_stop_price = previous_highest * (1 - trailing_stop_pct / 100) if previous_highest > buy_price else 0.0
+                points = sell_signal_points(target_price, first_manage_price, trailing_stop_price, hard_stop_price, vwap, vwap_fail_price)
                 advices.append(
-                    SellAdvice(ticker, row.get("name", ""), "HOLD_NO_INTRADAY", buy_date, buy_price, 0.0, 0.0, target_price, first_manage_price, hard_stop_price, previous_highest, 0.0, "暂无5分钟线，不能确认卖点")
+                    SellAdvice(ticker, row.get("name", ""), "HOLD_NO_INTRADAY", buy_date, buy_price, 0.0, 0.0, target_price, first_manage_price, trailing_stop_price, hard_stop_price, vwap_fail_price, previous_highest, 0.0, points, "暂无5分钟线，不能确认卖点")
                 )
                 continue
             highest = max(previous_highest, intraday_high, latest)
+            trailing_stop_price = highest * (1 - trailing_stop_pct / 100) if highest > buy_price else 0.0
             if highest != previous_highest:
                 row["highest_price"] = f"{highest:.4f}"
                 changed = True
             pnl_pct = (latest / buy_price - 1) * 100 if buy_price else 0.0
             same_day = buy_date == today.isoformat()
             first_manage_hit = first_manage_price > 0 and highest >= first_manage_price
+            points = sell_signal_points(target_price, first_manage_price, trailing_stop_price, hard_stop_price, vwap, vwap_fail_price)
             if same_day:
                 action = "HOLD_T1"
                 reason = "A股T+1，今天买入的仓位今天不能卖"
@@ -499,13 +531,13 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
             elif first_manage_hit and vwap > 0 and latest < vwap and latest_time >= "09:45":
                 action = "REDUCE_PROFIT"
                 reason = f"已触及第一管理线 {first_manage_price:.2f}，但跌回VWAP {vwap:.2f} 下方，提示保护利润/减仓"
-            elif first_manage_hit and highest > buy_price and latest <= highest * (1 - trailing_stop_pct / 100):
+            elif first_manage_hit and trailing_stop_price > 0 and latest <= trailing_stop_price:
                 action = "REDUCE_PROFIT"
                 reason = f"已触及第一管理线 {first_manage_price:.2f}，从持仓高点 {highest:.2f} 回撤超过 {trailing_stop_pct:.1f}%，提示保护利润/减仓"
             elif first_manage_price > 0 and latest >= first_manage_price:
                 action = "MANAGE_PROFIT"
                 reason = f"达到第一管理线 {first_manage_price:.2f}，不强制卖出；建议上移止损、盯VWAP，允许手动减仓"
-            elif highest > buy_price and latest <= highest * (1 - trailing_stop_pct / 100):
+            elif trailing_stop_price > 0 and latest <= trailing_stop_price:
                 action = "TRAIL_SELL"
                 reason = f"从日内/持仓高点 {highest:.2f} 回落超过 {trailing_stop_pct:.1f}%"
             elif latest_time >= "14:45" and latest < vwap and pnl_pct < 1.5:
@@ -528,9 +560,12 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                     vwap=round(vwap, 4),
                     target_price=round(target_price, 4),
                     first_manage_price=round(first_manage_price, 4),
+                    trailing_stop_price=round(trailing_stop_price, 4),
                     hard_stop_price=round(hard_stop_price, 4),
+                    vwap_fail_price=round(vwap_fail_price, 4),
                     highest_price=round(highest, 4),
                     pnl_pct=round(pnl_pct, 2),
+                    signal_points=points,
                     reason=reason,
                 )
             )
@@ -559,14 +594,14 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
         "",
         "## 先看卖出/持仓",
         "",
-        "| 动作 | 代码 | 名称 | 成本 | 最新 | VWAP | 盈亏 | 目标上沿 | 第一管理线 | 止损 | 理由 |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| 动作 | 代码 | 名称 | 成本 | 最新 | VWAP | 盈亏 | 目标上沿 | 第一管理线 | 移动止盈 | 硬止损 | VWAP弱势 | 理由 |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     if sell_advices:
         for item in sell_advices:
-            lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.buy_price:.2f} | {item.latest_price:.2f} | {item.vwap:.2f} | {item.pnl_pct:.2f}% | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.hard_stop_price:.2f} | {item.reason} |")
+            lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.buy_price:.2f} | {item.latest_price:.2f} | {item.vwap:.2f} | {item.pnl_pct:.2f}% | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.trailing_stop_price:.2f} | {item.hard_stop_price:.2f} | {item.vwap_fail_price:.2f} | {item.reason} |")
     else:
-        lines.append("| - | - | 当前没有登记持仓 | - | - | - | - | - | - | - | - |")
+        lines.append("| - | - | 当前没有登记持仓 | - | - | - | - | - | - | - | - | - | - |")
     lines.extend(
         [
             "",
@@ -593,13 +628,13 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "target_price", "first_manage_price", "hard_stop_price", "target_upper_hit_rate_pct", "first_manage_hit_rate_pct", "pnl_pct", "reason"]
+        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "target_upper_hit_rate_pct", "first_manage_hit_rate_pct", "pnl_pct", "signal_points", "reason"]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for item in sell_advices:
-            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "hard_stop_price": item.hard_stop_price, "target_upper_hit_rate_pct": "", "first_manage_hit_rate_pct": "", "pnl_pct": item.pnl_pct, "reason": item.reason})
+            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": item.trailing_stop_price, "hard_stop_price": item.hard_stop_price, "vwap_fail_price": item.vwap_fail_price, "target_upper_hit_rate_pct": "", "first_manage_hit_rate_pct": "", "pnl_pct": item.pnl_pct, "signal_points": item.signal_points, "reason": item.reason})
         for item in buy_advices:
-            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "hard_stop_price": item.hard_stop_price, "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "pnl_pct": "", "reason": item.reason})
+            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": "", "hard_stop_price": item.hard_stop_price, "vwap_fail_price": "", "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "pnl_pct": "", "signal_points": "", "reason": item.reason})
 
     shutil.copyfile(report, out_dir / "latest_plan.md")
     shutil.copyfile(json_path, out_dir / "latest_plan.json")

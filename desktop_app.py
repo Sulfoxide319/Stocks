@@ -69,7 +69,7 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
     raise SystemExit("PySide6 is required. Install dependencies or use the packaged EXE.") from exc
 
 
-ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标上沿", "第一管理线", "止损", "历史命中", "盈亏", "Edge", "理由"]
+ADVICE_COLUMNS = ["方向", "动作", "代码", "名称", "最新", "触发/成本", "目标上沿", "第一管理线", "移动止盈", "止损", "VWAP/成本", "历史命中", "盈亏", "Edge", "理由"]
 POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标上沿", "止损", "回撤%", "最高", "状态", "备注"]
 REPOSITORY = "Sulfoxide319/Stocks"
 AUTOSTART_VALUE_NAME = "StocksTradingAssistant"
@@ -904,7 +904,9 @@ class MainWindow(QMainWindow):
                 self._fmt(item.get("buy_price") if side == "卖出" else item.get("effective_trigger_price", item.get("trigger_price"))),
                 self._fmt(item.get("target_price")),
                 self._fmt(item.get("first_manage_price")),
+                self._fmt(item.get("trailing_stop_price")) if side == "卖出" else "",
                 self._fmt(item.get("hard_stop_price")),
+                self._fmt(item.get("vwap_fail_price")) if side == "卖出" else "",
                 f"{self._fmt(item.get('first_manage_hit_rate_pct'))}%" if side == "买入" and item.get("first_manage_hit_rate_pct") not in {None, ""} else "",
                 self._fmt(item.get("pnl_pct")) if side == "卖出" else "",
                 self._fmt(item.get("edge_score")) if side == "买入" else "",
@@ -924,7 +926,7 @@ class MainWindow(QMainWindow):
         if not items:
             return {}
         row = items[0].row()
-        keys = ["side", "action", "ticker", "name", "latest_price", "trigger_price", "target_price", "first_manage_price", "hard_stop_price", "hit_rate", "pnl_pct", "edge_score", "reason"]
+        keys = ["side", "action", "ticker", "name", "latest_price", "trigger_price", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "hit_rate", "pnl_pct", "edge_score", "reason"]
         values: dict[str, str] = {}
         for column, key in enumerate(keys):
             item = self.advice_table.item(row, column)
@@ -939,7 +941,8 @@ class MainWindow(QMainWindow):
             f"{row.get('side', '')} {row.get('action', '')} {row.get('ticker', '')} {row.get('name', '')}；"
             f"最新 {row.get('latest_price', '')}，触发/成本 {row.get('trigger_price', '')}，"
             f"目标上沿 {row.get('target_price', '')}，第一管理线 {row.get('first_manage_price', '')}，"
-            f"止损 {row.get('hard_stop_price', '')}，历史命中 {row.get('hit_rate', '')}。"
+            f"移动止盈 {row.get('trailing_stop_price', '')}，止损 {row.get('hard_stop_price', '')}，"
+            f"VWAP/成本 {row.get('vwap_fail_price', '')}，历史命中 {row.get('hit_rate', '')}。"
         )
         if row.get("side") == "买入":
             self.fill_quick_position_from_selection()
@@ -1046,7 +1049,9 @@ class MainWindow(QMainWindow):
                 self.alerted_sell_keys.add(key)
                 latest = self._fmt(item.get("latest_price"))
                 pnl = self._fmt(item.get("pnl_pct"))
-                sell_lines.append(f"{ticker} {item.get('name', '')} {action}：最新 {latest} / 盈亏 {pnl}%")
+                points = str(item.get("signal_points") or "").strip()
+                suffix = f" / {points}" if points else ""
+                sell_lines.append(f"{ticker} {item.get('name', '')} {action}：最新 {latest} / 盈亏 {pnl}%{suffix}")
         if buy_lines:
             self.append_log(f"{source}买入触发：" + "、".join(line.split()[0] for line in buy_lines))
             self.show_trade_popup(f"{source}买入触发", buy_lines, QMessageBox.Information)
