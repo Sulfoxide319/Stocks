@@ -1387,7 +1387,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--partial-sell-ratio-cold", type=float, default=0.5)
     parser.add_argument("--partial-sell-ratio-narrow-rally", type=float, default=0.3)
     parser.add_argument("--cold-min-traded-value-ratio", type=float, default=0.0)
-    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=5.0)
+    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=7.5)
     parser.add_argument("--cold-min-sector-momentum-5d-pct", type=float, default=-999.0)
     parser.add_argument("--normal-min-5d-range-pct", type=float, default=0.0)
     parser.add_argument("--normal-min-atr-pct", type=float, default=4.1)

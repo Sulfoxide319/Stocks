@@ -440,7 +440,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cold-min-score", type=float, default=87.0)
     parser.add_argument("--cold-max-gap-up", type=float, default=-1.0)
     parser.add_argument("--cold-gap-volume-min-ratio", type=float, default=1.5)
-    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=5.0)
+    parser.add_argument("--cold-min-momentum-10d-pct", type=float, default=7.5)
     parser.add_argument("--cold-max-5d-range-pct", type=float, default=1.0)
     parser.add_argument("--cold-max-momentum-10d-pct", type=float, default=1.0)
     parser.add_argument("--cold-max-close-position-20d-pct", type=float, default=1.0)
