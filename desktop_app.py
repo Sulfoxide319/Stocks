@@ -35,15 +35,18 @@ from app_storage import (
     save_position,
     set_setting,
 )
+from broker_position_sync import calculate_profit_protection_result, sync_holdings_to_sqlite
 from short_term_live_monitor import fetch_sina_quote
 
 
 try:
     from PySide6.QtCore import Qt, QThread, QTimer, Signal
-    from PySide6.QtGui import QAction, QFont
+    from PySide6.QtGui import QAction, QBrush, QColor, QFont
     from PySide6.QtWidgets import (
         QApplication,
+        QAbstractItemView,
         QCheckBox,
+        QDialog,
         QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
@@ -69,8 +72,23 @@ except ImportError as exc:  # pragma: no cover - only reached before dependencie
     raise SystemExit("PySide6 is required. Install dependencies or use the packaged EXE.") from exc
 
 
-ADVICE_COLUMNS = ["方向", "动作", "状态", "代码", "名称", "最新", "触发/成本", "建议资金", "质量", "目标上沿", "第一管理线", "移动止盈", "止损", "VWAP/成本", "可卖上沿", "触及上沿", "管理线", "样本数", "样本桶", "盈亏", "Edge", "理由"]
-POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标上沿", "止损", "回撤%", "最高", "管理状态", "状态", "备注"]
+ADVICE_COLUMNS = ["方向", "动作", "状态", "代码", "名称", "最新", "触发/成本", "建议资金", "质量", "分数", "目标上沿", "第一管理线", "移动止盈", "止损", "VWAP/成本", "可卖上沿", "触及上沿", "管理线", "样本数", "样本桶", "盈亏", "Edge", "理由"]
+POSITION_COLUMNS = ["代码", "名称", "买入日期", "买入时间", "成本", "数量", "目标上沿", "最近价", "当前收益%", "第一管理线", "动态保护线", "止损", "回撤%", "最高", "管理结果", "管理状态", "状态", "备注"]
+POSITION_FIELD_COLUMNS = {
+    "ticker": "代码",
+    "name": "名称",
+    "buy_date": "买入日期",
+    "buy_time": "买入时间",
+    "buy_price": "成本",
+    "shares": "数量",
+    "target_price": "目标上沿",
+    "hard_stop_price": "止损",
+    "trailing_stop_pct": "回撤%",
+    "highest_price": "最高",
+    "management_state": "管理状态",
+    "status": "状态",
+    "notes": "备注",
+}
 REPOSITORY = "Sulfoxide319/Stocks"
 AUTOSTART_VALUE_NAME = "StocksTradingAssistant"
 LIVE_WATCH_LIMIT = 30
@@ -106,7 +124,13 @@ def ensure_text_stdio() -> None:
 
 ensure_text_stdio()
 
-from local_trading_assistant import build_arg_parser, phase_for_time, run_once
+from local_trading_assistant import build_arg_parser, first_manage_price_from_position, phase_for_time, run_once
+from guoshengrui_bridge import (
+    export_guoshengrui_holdings,
+    open_guoshengrui_for_ticker as jump_guoshengrui_for_ticker,
+    open_guoshengrui_trade_for_ticker as jump_guoshengrui_trade_for_ticker,
+)
+from single_stock_analysis import analyze_single_stock
 
 
 def app_root() -> Path:
@@ -400,6 +424,57 @@ class UpdateWorker(QThread):
         self.finished_update.emit(check_latest_update(self.root))
 
 
+class SingleStockWorker(QThread):
+    finished_analysis = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        root: Path,
+        ticker: str,
+        *,
+        buy_price: float,
+        shares: float,
+        buy_date: str,
+        target_price: float,
+        hard_stop_price: float,
+        trailing_stop_pct: float,
+        highest_price: float,
+        market_state_hint: str,
+    ) -> None:
+        super().__init__()
+        self.root = root
+        self.ticker = ticker
+        self.buy_price = buy_price
+        self.shares = shares
+        self.buy_date = buy_date
+        self.target_price = target_price
+        self.hard_stop_price = hard_stop_price
+        self.trailing_stop_pct = trailing_stop_pct
+        self.highest_price = highest_price
+        self.market_state_hint = market_state_hint
+
+    def run(self) -> None:
+        try:
+            result = analyze_single_stock(
+                self.root,
+                self.ticker,
+                buy_price=self.buy_price,
+                shares=self.shares,
+                buy_date=self.buy_date,
+                target_price=self.target_price,
+                hard_stop_price=self.hard_stop_price,
+                trailing_stop_pct=self.trailing_stop_pct,
+                highest_price=self.highest_price,
+                market_state_hint=self.market_state_hint,
+            )
+            self.finished_analysis.emit(result)
+        except BaseException as exc:
+            write_scan_debug_log(f"[single-stock] 分析失败：{type(exc).__name__}: {exc}")
+            write_scan_debug_log(traceback.format_exc().rstrip())
+            self.failed.emit(str(exc))
+
+
 class CandidateWatchWorker(QThread):
     finished_watch = Signal(dict)
     failed = Signal(str)
@@ -496,8 +571,10 @@ class MainWindow(QMainWindow):
         self.selected_position_id: int | None = None
         self.scan_worker: ScanWorker | None = None
         self.update_worker: UpdateWorker | None = None
+        self.single_stock_worker: SingleStockWorker | None = None
         self.candidate_watch_worker: CandidateWatchWorker | None = None
         self.current_payload: dict[str, Any] = {}
+        self.single_stock_result: dict[str, Any] = {}
         self.alerted_buy_keys: set[str] = set()
         self.alerted_sell_keys: set[str] = set()
         self.last_live_watch_skip_log_at: dt.datetime | None = None
@@ -667,6 +744,7 @@ class MainWindow(QMainWindow):
         self.advice_table.horizontalHeader().setStretchLastSection(True)
         self.advice_table.setAlternatingRowColors(True)
         self.advice_table.itemSelectionChanged.connect(self.on_advice_selected)
+        self.advice_table.cellClicked.connect(self.on_advice_cell_clicked)
         advice_layout.addWidget(self.advice_table)
         self.detail_label = QLabel("选择一条建议查看详情。")
         self.detail_label.setWordWrap(True)
@@ -681,10 +759,76 @@ class MainWindow(QMainWindow):
         self.positions_table.horizontalHeader().setStretchLastSection(True)
         self.positions_table.setAlternatingRowColors(True)
         self.positions_table.itemSelectionChanged.connect(self.on_position_selected)
+        self.positions_table.cellClicked.connect(self.on_position_cell_clicked)
         positions_layout.addWidget(self.positions_table, 1)
         positions_layout.addWidget(self._build_position_form())
         tabs.addTab(positions_page, "持仓管理")
+
+        tabs.addTab(self._build_single_stock_tab(), "单股分析")
         return tabs
+
+    def _build_single_stock_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        form = QFormLayout()
+        self.single_ticker_input = QLineEdit()
+        self.single_ticker_input.setPlaceholderText("例如 600363")
+        self.single_buy_price_spin = QDoubleSpinBox()
+        self.single_buy_price_spin.setRange(0, 9999)
+        self.single_buy_price_spin.setDecimals(3)
+        self.single_buy_price_spin.setSingleStep(0.01)
+        self.single_shares_spin = QDoubleSpinBox()
+        self.single_shares_spin.setRange(0, 100_000_000)
+        self.single_shares_spin.setDecimals(0)
+        self.single_shares_spin.setSingleStep(100)
+        self.single_buy_date_input = QLineEdit()
+        self.single_buy_date_input.setPlaceholderText(dt.date.today().isoformat())
+        self.single_target_price_spin = QDoubleSpinBox()
+        self.single_target_price_spin.setRange(0, 9999)
+        self.single_target_price_spin.setDecimals(3)
+        self.single_target_price_spin.setSingleStep(0.01)
+        self.single_stop_price_spin = QDoubleSpinBox()
+        self.single_stop_price_spin.setRange(0, 9999)
+        self.single_stop_price_spin.setDecimals(3)
+        self.single_stop_price_spin.setSingleStep(0.01)
+        self.single_trailing_pct_spin = QDoubleSpinBox()
+        self.single_trailing_pct_spin.setRange(0, 30)
+        self.single_trailing_pct_spin.setDecimals(2)
+        self.single_trailing_pct_spin.setSingleStep(0.25)
+        self.single_trailing_pct_spin.setValue(3.0)
+        self.single_highest_price_spin = QDoubleSpinBox()
+        self.single_highest_price_spin.setRange(0, 9999)
+        self.single_highest_price_spin.setDecimals(3)
+        self.single_highest_price_spin.setSingleStep(0.01)
+        form.addRow("股票代码", self.single_ticker_input)
+        form.addRow("买入成本（可选）", self.single_buy_price_spin)
+        form.addRow("持仓数量（可选）", self.single_shares_spin)
+        form.addRow("买入日期（可选）", self.single_buy_date_input)
+        form.addRow("目标上沿（可选）", self.single_target_price_spin)
+        form.addRow("硬止损（可选）", self.single_stop_price_spin)
+        form.addRow("移动止盈回撤%", self.single_trailing_pct_spin)
+        form.addRow("持仓最高价（可选）", self.single_highest_price_spin)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        self.single_analyze_button = QPushButton("分析这只股票")
+        self.single_analyze_button.clicked.connect(self.start_single_stock_analysis)
+        self.single_save_position_button = QPushButton("登记为持仓")
+        self.single_save_position_button.clicked.connect(self.save_single_analysis_position)
+        self.single_open_xueqiu_button = QPushButton("打开雪球")
+        self.single_open_xueqiu_button.clicked.connect(lambda: self.open_xueqiu_for_ticker(self.single_ticker_input.text()))
+        buttons.addWidget(self.single_analyze_button)
+        buttons.addWidget(self.single_save_position_button)
+        buttons.addWidget(self.single_open_xueqiu_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.single_result_box = QTextEdit()
+        self.single_result_box.setReadOnly(True)
+        self.single_result_box.setMinimumHeight(360)
+        self.single_result_box.setPlainText("输入股票代码后点击“分析这只股票”。填入买入成本后，会同时给出持仓卖点诊断。")
+        layout.addWidget(self.single_result_box, 1)
+        return page
 
     def _build_position_form(self) -> QWidget:
         container = QWidget()
@@ -722,10 +866,13 @@ class MainWindow(QMainWindow):
         delete_button.clicked.connect(self.delete_selected_position)
         import_button = QPushButton("导入 CSV")
         import_button.clicked.connect(self.import_positions)
+        broker_scan_button = QPushButton("扫描国盛睿持仓")
+        broker_scan_button.clicked.connect(self.sync_positions_from_guoshengrui)
         buttons.addWidget(new_button)
         buttons.addWidget(save_button)
         buttons.addWidget(delete_button)
         buttons.addStretch(1)
+        buttons.addWidget(broker_scan_button)
         buttons.addWidget(import_button)
         layout.addLayout(buttons)
         return container
@@ -906,6 +1053,7 @@ class MainWindow(QMainWindow):
                 self._fmt(item.get("buy_price") if side == "卖出" else item.get("effective_trigger_price", item.get("trigger_price"))),
                 f"{self._fmt(item.get('suggested_capital_pct'))}%" if side == "买入" else "",
                 f"{item.get('position_quality_grade', '')}/{self._fmt(item.get('position_quality_score'))}" if side == "买入" else "",
+                self._fmt(item.get("score")) if side == "买入" else "",
                 self._fmt(item.get("target_price")),
                 self._fmt(item.get("first_manage_price")),
                 self._fmt(item.get("trailing_stop_price")) if side == "卖出" else "",
@@ -920,8 +1068,17 @@ class MainWindow(QMainWindow):
                 self._fmt(item.get("edge_score")) if side == "买入" else "",
                 item.get("reason", ""),
             ]
+            ticker_column = ADVICE_COLUMNS.index("代码")
+            name_column = ADVICE_COLUMNS.index("名称")
             for column, value in enumerate(values):
-                self.advice_table.setItem(row_index, column, QTableWidgetItem(str(value)))
+                table_item = QTableWidgetItem(str(value))
+                if column == ticker_column:
+                    table_item.setToolTip("点击复制股票代码并跳转国盛睿")
+                    table_item.setForeground(QBrush(QColor("#2158a8")))
+                elif column == name_column:
+                    table_item.setToolTip("点击打开雪球页面")
+                    table_item.setForeground(QBrush(QColor("#2158a8")))
+                self.advice_table.setItem(row_index, column, table_item)
         self.advice_table.resizeColumnsToContents()
 
     @staticmethod
@@ -929,12 +1086,252 @@ class MainWindow(QMainWindow):
         digits = "".join(ch for ch in value.strip() if ch.isdigit())
         return digits[:6]
 
+    @classmethod
+    def xueqiu_symbol(cls, value: str) -> str:
+        ticker = cls.normalize_ticker(value)
+        if not ticker:
+            return ""
+        if ticker.startswith(("6", "9")):
+            return f"SH{ticker}"
+        if ticker.startswith(("4", "8")):
+            return f"BJ{ticker}"
+        return f"SZ{ticker}"
+
+    @classmethod
+    def xueqiu_url(cls, value: str) -> str:
+        symbol = cls.xueqiu_symbol(value)
+        return f"https://xueqiu.com/S/{symbol}" if symbol else ""
+
+    @staticmethod
+    def table_item_text(table: QTableWidget, row: int, column: int) -> str:
+        item = table.item(row, column)
+        return item.text().strip() if item else ""
+
+    def copy_ticker_to_clipboard(self, ticker_text: str) -> None:
+        ticker = self.normalize_ticker(ticker_text)
+        if not ticker:
+            return
+        QApplication.clipboard().setText(ticker)
+        self.statusBar().showMessage(f"已复制股票代码，正在跳转国盛睿：{ticker}")
+        result = jump_guoshengrui_for_ticker(ticker)
+        self.statusBar().showMessage(result.message, 6000)
+        self.append_log(result.message)
+        if not result.ok and result.code in {"missing_executable", "no_window", "dangerous_foreground"}:
+            QMessageBox.warning(self, "国盛睿跳转", result.message)
+
+    def open_xueqiu_for_ticker(self, ticker_text: str) -> None:
+        symbol = self.xueqiu_symbol(ticker_text)
+        if not symbol:
+            return
+        webbrowser.open_new_tab(f"https://xueqiu.com/S/{symbol}")
+        self.statusBar().showMessage(f"已打开雪球：{symbol}", 3000)
+
+    def handle_stock_cell_clicked(
+        self,
+        table: QTableWidget,
+        row: int,
+        column: int,
+        *,
+        ticker_column: int,
+        name_column: int,
+    ) -> None:
+        if column == ticker_column:
+            self.copy_ticker_to_clipboard(self.table_item_text(table, row, ticker_column))
+        elif column == name_column:
+            self.open_xueqiu_for_ticker(self.table_item_text(table, row, ticker_column))
+
+    def on_advice_cell_clicked(self, row: int, column: int) -> None:
+        self.handle_stock_cell_clicked(
+            self.advice_table,
+            row,
+            column,
+            ticker_column=ADVICE_COLUMNS.index("代码"),
+            name_column=ADVICE_COLUMNS.index("名称"),
+        )
+
+    def on_position_cell_clicked(self, row: int, column: int) -> None:
+        self.handle_stock_cell_clicked(
+            self.positions_table,
+            row,
+            column,
+            ticker_column=POSITION_COLUMNS.index("代码"),
+            name_column=POSITION_COLUMNS.index("名称"),
+        )
+
+    def current_market_state_hint(self) -> str:
+        for group in ("buy", "sell"):
+            rows = self.current_payload.get(group)
+            if not isinstance(rows, list):
+                continue
+            for item in rows:
+                if isinstance(item, dict) and item.get("market_state"):
+                    return str(item.get("market_state") or "").strip()
+        return ""
+
+    def start_single_stock_analysis(self) -> None:
+        if self.single_stock_worker and self.single_stock_worker.isRunning():
+            QMessageBox.information(self, "单股分析", "上一轮单股分析还在运行。")
+            return
+        ticker = self.normalize_ticker(self.single_ticker_input.text())
+        if len(ticker) != 6:
+            QMessageBox.warning(self, "代码有误", "股票代码必须是 6 位数字。")
+            return
+        self.single_ticker_input.setText(ticker)
+        self.single_result_box.setPlainText(f"正在分析 {ticker}，会读取日线、盘中VWAP、历史命中率和持仓卖点规则...")
+        self.single_analyze_button.setEnabled(False)
+        self.statusBar().showMessage(f"正在分析 {ticker}...")
+        self.single_stock_worker = SingleStockWorker(
+            self.root,
+            ticker,
+            buy_price=float(self.single_buy_price_spin.value()),
+            shares=float(self.single_shares_spin.value()),
+            buy_date=self.single_buy_date_input.text().strip(),
+            target_price=float(self.single_target_price_spin.value()),
+            hard_stop_price=float(self.single_stop_price_spin.value()),
+            trailing_stop_pct=float(self.single_trailing_pct_spin.value()),
+            highest_price=float(self.single_highest_price_spin.value()),
+            market_state_hint=self.current_market_state_hint(),
+        )
+        self.single_stock_worker.finished_analysis.connect(self.on_single_stock_analysis_done)
+        self.single_stock_worker.failed.connect(self.on_single_stock_analysis_failed)
+        self.single_stock_worker.start()
+
+    def on_single_stock_analysis_done(self, result: dict[str, Any]) -> None:
+        self.single_analyze_button.setEnabled(True)
+        self.single_stock_result = result
+        self.single_result_box.setPlainText(self.format_single_stock_result(result))
+        ticker = str(result.get("ticker") or "")
+        self.statusBar().showMessage(f"单股分析完成：{ticker}", 4000)
+        self.append_log(f"单股分析完成：{ticker} {result.get('name', '')}")
+
+    def on_single_stock_analysis_failed(self, message: str) -> None:
+        self.single_analyze_button.setEnabled(True)
+        self.single_result_box.setPlainText(f"单股分析失败：{message}")
+        self.statusBar().showMessage("单股分析失败", 4000)
+        QMessageBox.warning(self, "单股分析失败", message[:2000])
+
+    def format_single_stock_result(self, result: dict[str, Any]) -> str:
+        buy = result.get("buy") if isinstance(result.get("buy"), dict) else {}
+        sell = result.get("sell") if isinstance(result.get("sell"), dict) else None
+        ref = result.get("reference_plan") if isinstance(result.get("reference_plan"), dict) else {}
+        features = result.get("features") if isinstance(result.get("features"), dict) else {}
+        hit = result.get("hit_rates") if isinstance(result.get("hit_rates"), dict) else {}
+        intraday = result.get("intraday") if isinstance(result.get("intraday"), dict) else {}
+        blocked = result.get("blocked_reason_labels") or []
+        lines = [
+            f"{result.get('ticker', '')} {result.get('name', '')} 单股诊断",
+            f"生成时间：{result.get('generated_at', '-')}",
+            f"日线日期：{result.get('daily_date', '-')}；数据源：{result.get('price_source', '-')}",
+            f"市场状态：{result.get('market_state', '-')}；默认可买池：{'是' if result.get('buyable') else '否'}；事件分：{result.get('event_score', 0)}",
+            "",
+            "买入诊断",
+            f"动作：{buy.get('action', '-')}",
+            f"最新/参考：{self._fmt(buy.get('latest_price'))}；触发价：{self._fmt(buy.get('trigger_price'))}；VWAP：{self._fmt(buy.get('vwap'))}",
+            f"分数：{self._fmt(features.get('score'))}；质量：{features.get('quality_grade', '-')}/{self._fmt(features.get('quality_score'))}；Edge：{self._fmt(features.get('edge_score'))}",
+            f"建议资金：{self._fmt(buy.get('suggested_capital_pct'))}%；仓位依据：{buy.get('capital_reason', '-')}",
+            f"解释：{buy.get('reason', '-')}",
+        ]
+        if blocked:
+            lines.append("阻断/观察原因：" + "；".join(str(item) for item in blocked))
+        intraday_risks = intraday.get("risks") or []
+        if intraday_risks:
+            lines.append("盘中风险：" + "；".join(str(item) for item in intraday_risks))
+        lines.extend(
+            [
+                "",
+                "关键价位",
+                f"参考价：{self._fmt(ref.get('reference_price'))}",
+                f"目标上沿：{self._fmt(ref.get('target_price'))}（+{self._fmt(ref.get('target_pct'))}%）",
+                f"第一管理线：{self._fmt(ref.get('first_manage_price'))}（+{self._fmt(ref.get('first_manage_pct'))}%）",
+                f"硬止损：{self._fmt(ref.get('hard_stop_price'))}（-{self._fmt(ref.get('hard_stop_pct'))}%）",
+                f"移动止盈回撤：{self._fmt(ref.get('trailing_stop_pct'))}%",
+                f"历史样本：N={hit.get('sample_size', 0)}；桶={hit.get('bucket', '-')}",
+                f"可卖上沿/触及上沿/管理线：{self._hit_rate_fmt(hit.get('target_upper_hit_rate_pct'))} / {self._hit_rate_fmt(hit.get('target_upper_touch_rate_pct'))} / {self._hit_rate_fmt(hit.get('first_manage_hit_rate_pct'))}",
+                "",
+                "技术特征",
+                f"形态：{features.get('setup_type', '-')}; 成交额倍率：{self._fmt(features.get('traded_value_ratio'))}; ATR：{self._fmt(features.get('atr_pct'))}%",
+                f"3日动量：{self._fmt(features.get('momentum_3d_pct'))}%；10日动量：{self._fmt(features.get('momentum_10d_pct'))}%；20日位置：{self._fmt(features.get('close_position_20d_pct'))}%",
+                f"距MA5：{self._fmt(features.get('distance_to_ma5_pct'))}%；距20日高点：{self._fmt(features.get('distance_to_20d_high_pct'))}%；站上MA20：{'是' if features.get('above_ma20') else '否'}",
+            ]
+        )
+        if sell:
+            lines.extend(
+                [
+                    "",
+                    "持仓卖点诊断",
+                    f"动作：{sell.get('action', '-')}; 状态：{sell.get('management_state', '-')}; 盈亏：{self._fmt(sell.get('pnl_pct'))}%",
+                    f"成本：{self._fmt(sell.get('buy_price'))}；最新：{self._fmt(sell.get('latest_price'))}；VWAP：{self._fmt(sell.get('vwap'))}",
+                    f"目标上沿：{self._fmt(sell.get('target_price'))}；第一管理线：{self._fmt(sell.get('first_manage_price'))}；移动止盈：{self._fmt(sell.get('trailing_stop_price'))}",
+                    f"硬止损：{self._fmt(sell.get('hard_stop_price'))}；VWAP弱势线：{self._fmt(sell.get('vwap_fail_price'))}；持仓最高：{self._fmt(sell.get('highest_price'))}",
+                    f"卖点提示：{sell.get('signal_points', '-')}",
+                    f"解释：{sell.get('reason', '-')}",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "持仓卖点诊断",
+                    "未填写买入成本，因此只输出新买入诊断和入场后的参考管理线。填入成本后会同时判断当前是否应止损、减仓、止盈或继续持有。",
+                ]
+            )
+        warning = str(result.get("price_warning") or "").strip()
+        if warning:
+            lines.extend(["", f"数据提示：{warning}"])
+        return "\n".join(lines)
+
+    def save_single_analysis_position(self) -> None:
+        ticker = self.normalize_ticker(self.single_ticker_input.text())
+        buy_price = float(self.single_buy_price_spin.value())
+        shares = float(self.single_shares_spin.value())
+        if len(ticker) != 6:
+            QMessageBox.warning(self, "持仓信息有误", "股票代码必须是 6 位数字。")
+            return
+        if buy_price <= 0 or shares <= 0:
+            QMessageBox.warning(self, "持仓信息有误", "登记持仓需要填写买入成本和持仓数量。")
+            return
+        result = self.single_stock_result if self.single_stock_result.get("ticker") == ticker else {}
+        sell = result.get("sell") if isinstance(result.get("sell"), dict) else {}
+        ref = result.get("reference_plan") if isinstance(result.get("reference_plan"), dict) else {}
+        target_price = self._float(sell.get("target_price"), float(self.single_target_price_spin.value()))
+        hard_stop_price = self._float(sell.get("hard_stop_price"), float(self.single_stop_price_spin.value()))
+        if target_price <= 0:
+            target_price = buy_price * (1 + self._float(ref.get("target_pct")) / 100)
+        if hard_stop_price <= 0:
+            hard_stop_price = buy_price * (1 - self._float(ref.get("hard_stop_pct")) / 100)
+        highest_price = float(self.single_highest_price_spin.value()) or max(buy_price, self._float((result.get("buy") or {}).get("latest_price"), buy_price))
+        name = str(result.get("name") or "")
+        with connect(self.db_path) as conn:
+            existing = next((item for item in list_positions(conn, open_only=True) if self.normalize_ticker(item.ticker) == ticker), None)
+            if existing and QMessageBox.question(self, "更新已有持仓", f"{ticker} 已有 open 持仓，是否更新成本和数量？") != QMessageBox.Yes:
+                return
+            position = Position(
+                id=existing.id if existing else None,
+                ticker=ticker,
+                name=name or (existing.name if existing else ""),
+                buy_date=self.single_buy_date_input.text().strip() or dt.date.today().isoformat(),
+                buy_time=dt.datetime.now().time().isoformat(timespec="minutes"),
+                buy_price=buy_price,
+                shares=shares,
+                target_price=target_price,
+                hard_stop_price=hard_stop_price,
+                trailing_stop_pct=float(self.single_trailing_pct_spin.value()),
+                highest_price=highest_price,
+                management_state=existing.management_state if existing else "OPEN",
+                status="open",
+                notes=f"单股分析登记；来源：{dt.datetime.now():%Y-%m-%d %H:%M}",
+            )
+            self.selected_position_id = save_position(conn, position)
+        self.refresh_positions()
+        self.append_log(f"单股分析已登记持仓：{ticker} 成本 {buy_price:.3f} 数量 {shares:.0f}")
+        QMessageBox.information(self, "已登记持仓", f"{ticker} 已写入本地持仓库。")
+
     def selected_advice_row(self) -> dict[str, str]:
         items = self.advice_table.selectedItems()
         if not items:
             return {}
         row = items[0].row()
-        keys = ["side", "action", "management_state", "ticker", "name", "latest_price", "trigger_price", "suggested_capital_pct", "position_quality", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "target_upper_hit_rate", "target_upper_touch_rate", "first_manage_hit_rate", "hit_rate_sample_size", "hit_rate_bucket", "pnl_pct", "edge_score", "reason"]
+        keys = ["side", "action", "management_state", "ticker", "name", "latest_price", "trigger_price", "suggested_capital_pct", "position_quality", "score", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "target_upper_hit_rate", "target_upper_touch_rate", "first_manage_hit_rate", "hit_rate_sample_size", "hit_rate_bucket", "pnl_pct", "edge_score", "reason"]
         values: dict[str, str] = {}
         for column, key in enumerate(keys):
             item = self.advice_table.item(row, column)
@@ -948,7 +1345,7 @@ class MainWindow(QMainWindow):
         self.detail_label.setText(
             f"{row.get('side', '')} {row.get('action', '')} {row.get('ticker', '')} {row.get('name', '')}；"
             f"状态 {row.get('management_state', '')}，最新 {row.get('latest_price', '')}，触发/成本 {row.get('trigger_price', '')}，"
-            f"建议资金 {row.get('suggested_capital_pct', '')}，质量 {row.get('position_quality', '')}，"
+            f"建议资金 {row.get('suggested_capital_pct', '')}，质量 {row.get('position_quality', '')}，分数 {row.get('score', '')}，"
             f"目标上沿 {row.get('target_price', '')}，第一管理线 {row.get('first_manage_price', '')}，"
             f"移动止盈 {row.get('trailing_stop_price', '')}，止损 {row.get('hard_stop_price', '')}，"
             f"VWAP/成本 {row.get('vwap_fail_price', '')}，可卖上沿 {row.get('target_upper_hit_rate', '')}，"
@@ -1034,10 +1431,255 @@ class MainWindow(QMainWindow):
         box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         box.exec()
 
+    @staticmethod
+    def trade_side_for_popup_item(item: dict[str, Any]) -> str:
+        side = str(item.get("side") or "")
+        action = str(item.get("action") or "")
+        if side == "买入" or action == "BUY_NOW":
+            return "buy"
+        return "sell"
+
+    def open_position_shares(self, ticker_text: str) -> float:
+        ticker = self.normalize_ticker(ticker_text)
+        if not ticker:
+            return 0.0
+        try:
+            with connect(self.db_path) as conn:
+                return sum(
+                    float(position.shares or 0.0)
+                    for position in list_positions(conn, open_only=True)
+                    if self.normalize_ticker(position.ticker) == ticker
+                )
+        except Exception:
+            return 0.0
+
+    def estimated_open_holdings_value(self) -> float:
+        latest_by_ticker: dict[str, float] = {}
+        for item in self.current_payload.get("sell") or []:
+            if not isinstance(item, dict):
+                continue
+            ticker = self.normalize_ticker(str(item.get("ticker") or ""))
+            latest = self._float(item.get("latest_price"), 0.0)
+            if ticker and latest > 0:
+                latest_by_ticker[ticker] = latest
+        try:
+            with connect(self.db_path) as conn:
+                total = 0.0
+                for position in list_positions(conn, open_only=True):
+                    ticker = self.normalize_ticker(position.ticker)
+                    price = latest_by_ticker.get(ticker) or float(position.buy_price or 0.0)
+                    total += max(0.0, float(position.shares or 0.0)) * max(0.0, price)
+                return round(total, 2)
+        except Exception:
+            return 0.0
+
+    def reference_buy_price_for_item(self, item: dict[str, Any]) -> float:
+        for key in ("latest_price", "effective_trigger_price", "trigger_price"):
+            value = self._float(item.get(key), 0.0)
+            if value > 0:
+                return value
+        return 0.0
+
+    def save_trade_account_settings(self, cash_amount: float, holdings_value: float, total_assets: float) -> None:
+        if cash_amount <= 0 and holdings_value <= 0 and total_assets <= 0:
+            return
+        try:
+            with connect(self.db_path) as conn:
+                set_setting(conn, "trade_cash_amount", f"{cash_amount:.2f}")
+                set_setting(conn, "trade_holdings_value", f"{holdings_value:.2f}")
+                set_setting(conn, "trade_total_assets", f"{total_assets:.2f}")
+        except Exception:
+            return
+
+    def open_trade_terminal_for_item(
+        self,
+        item: dict[str, Any],
+        cash_amount: float = 0.0,
+        holdings_value: float = 0.0,
+        total_assets: float = 0.0,
+    ) -> None:
+        ticker = self.normalize_ticker(str(item.get("ticker") or ""))
+        if len(ticker) != 6:
+            QMessageBox.warning(self, "交易界面跳转", "股票代码必须是 6 位数字。")
+            return
+        side = self.trade_side_for_popup_item(item)
+        clean_cash = max(0.0, float(cash_amount or 0.0))
+        clean_holdings = max(0.0, float(holdings_value or 0.0))
+        clean_total = max(0.0, float(total_assets or 0.0))
+        if clean_total <= 0:
+            clean_total = clean_cash + clean_holdings
+        if side == "buy":
+            self.save_trade_account_settings(clean_cash, clean_holdings, clean_total)
+        QApplication.clipboard().setText(ticker)
+        result = jump_guoshengrui_trade_for_ticker(
+            ticker,
+            side,
+            account_cash_amount=clean_cash,
+            account_holdings_value=clean_holdings,
+            account_total_assets=clean_total,
+            reference_price=self.reference_buy_price_for_item(item),
+            suggested_capital_pct=self._float(item.get("suggested_capital_pct"), 0.0),
+            existing_shares=self.open_position_shares(ticker),
+            fill_quantity=side == "buy" and clean_total > 0,
+        )
+        self.statusBar().showMessage(result.message, 8000)
+        self.append_log(result.message)
+        if not result.ok:
+            QMessageBox.warning(self, "交易界面跳转", result.message)
+
+    def show_trade_action_popup(
+        self,
+        title: str,
+        items: list[dict[str, Any]],
+        icon: QMessageBox.Icon = QMessageBox.Warning,
+    ) -> None:
+        if not items:
+            return
+        QApplication.beep()
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        layout = QVBoxLayout(dialog)
+
+        title_label = QLabel(title)
+        title_label.setFont(QFont("Microsoft YaHei UI", 12, QFont.Bold))
+        layout.addWidget(title_label)
+        subtitle = QLabel("按钮先跳转分时图，再右键打开国盛睿闪电买/卖窗口；买入按账户总资产比例填数量，不自动下单。")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        cash_spin: QDoubleSpinBox | None = None
+        holdings_spin: QDoubleSpinBox | None = None
+        total_spin: QDoubleSpinBox | None = None
+        if any(self.trade_side_for_popup_item(item) == "buy" for item in items):
+            with connect(self.db_path) as conn:
+                default_cash = self._setting_float(conn, "trade_cash_amount", 0.0, 0.0, 1_000_000_000.0)
+                saved_holdings = get_setting(conn, "trade_holdings_value", "")
+                saved_total = get_setting(conn, "trade_total_assets", "")
+            default_holdings = self._float(saved_holdings, self.estimated_open_holdings_value()) if saved_holdings else self.estimated_open_holdings_value()
+            default_total = self._float(saved_total, default_cash + default_holdings) if saved_total else default_cash + default_holdings
+            account_row = QHBoxLayout()
+            cash_spin = QDoubleSpinBox(dialog)
+            cash_spin.setRange(0, 1_000_000_000)
+            cash_spin.setDecimals(2)
+            cash_spin.setSingleStep(10_000)
+            cash_spin.setValue(default_cash)
+            cash_spin.setToolTip("你账户当前可用于买入的现金。")
+            holdings_spin = QDoubleSpinBox(dialog)
+            holdings_spin.setRange(0, 1_000_000_000)
+            holdings_spin.setDecimals(2)
+            holdings_spin.setSingleStep(10_000)
+            holdings_spin.setValue(default_holdings)
+            holdings_spin.setToolTip("当前持仓市值；可从国盛睿资金股份查询自动扫描。")
+            total_spin = QDoubleSpinBox(dialog)
+            total_spin.setRange(0, 1_000_000_000)
+            total_spin.setDecimals(2)
+            total_spin.setSingleStep(10_000)
+            total_spin.setValue(default_total)
+            total_spin.setToolTip("账户总资产；优先使用国盛睿扫描到的资产字段。")
+            scan_account_button = QPushButton("扫描账户")
+            scan_account_button.setToolTip("从国盛睿资金股份查询扫描可用现金、持仓市值和总资产。")
+
+            def update_total_label() -> None:
+                total_spin.setValue(cash_spin.value() + holdings_spin.value())
+
+            def scan_account_snapshot() -> None:
+                result = export_guoshengrui_holdings()
+                if not result.ok:
+                    QMessageBox.warning(dialog, "账户扫描失败", result.message)
+                    self.append_log(result.message)
+                    return
+                summary = sync_holdings_to_sqlite(self.db_path, result)
+                cash_spin.setValue(summary.cash_available)
+                holdings_spin.setValue(summary.holdings_value)
+                total_spin.setValue(summary.total_assets)
+                self.refresh_positions()
+                self.append_log(summary.message)
+
+            cash_spin.valueChanged.connect(update_total_label)
+            holdings_spin.valueChanged.connect(update_total_label)
+            scan_account_button.clicked.connect(scan_account_snapshot)
+            account_row.addWidget(QLabel("可用现金"))
+            account_row.addWidget(cash_spin)
+            account_row.addWidget(QLabel("持仓市值"))
+            account_row.addWidget(holdings_spin)
+            account_row.addWidget(QLabel("总资产"))
+            account_row.addWidget(total_spin)
+            account_row.addWidget(scan_account_button)
+            account_row.addStretch(1)
+            layout.addLayout(account_row)
+
+        table = QTableWidget(len(items), 7, dialog)
+        table.setHorizontalHeaderLabels(["方向", "动作", "代码", "名称", "最新", "理由", "交易界面"])
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.cellClicked.connect(
+            lambda row, column: self.handle_stock_cell_clicked(
+                table,
+                row,
+                column,
+                ticker_column=2,
+                name_column=3,
+            )
+        )
+        for row_index, item in enumerate(items):
+            side_text = str(item.get("side") or "")
+            action_text = str(item.get("action") or "")
+            latest = self._fmt(item.get("latest_price"))
+            reason = str(item.get("reason") or item.get("signal_points") or "")
+            values = [
+                side_text,
+                action_text,
+                str(item.get("ticker") or ""),
+                str(item.get("name") or ""),
+                latest,
+                reason,
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+                if column == 2:
+                    cell.setToolTip("点击复制股票代码并跳转国盛睿")
+                    cell.setForeground(QBrush(QColor("#2158a8")))
+                elif column == 3:
+                    cell.setToolTip("点击打开雪球页面")
+                    cell.setForeground(QBrush(QColor("#2158a8")))
+                table.setItem(row_index, column, cell)
+            trade_side = self.trade_side_for_popup_item(item)
+            button_text = "打开并填数量" if trade_side == "buy" else "打开卖出界面"
+            button = QPushButton(button_text)
+            button.setToolTip("买入会按总资产仓位比例、可用现金和已有持仓填入数量；仍需你手动核对并自行提交。")
+            payload = dict(item)
+            button.clicked.connect(
+                lambda _checked=False, row=payload, cash=cash_spin, holdings=holdings_spin, total=total_spin: self.open_trade_terminal_for_item(
+                    row,
+                    float(cash.value()) if cash is not None else 0.0,
+                    float(holdings.value()) if holdings is not None else 0.0,
+                    float(total.value()) if total is not None else 0.0,
+                )
+            )
+            table.setCellWidget(row_index, 6, button)
+
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        layout.addWidget(table)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close_button = QPushButton("我知道了")
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        dialog.resize(980, min(520, 210 + len(items) * 42))
+        dialog.exec()
+
     def alert_payload_actions(self, payload: dict[str, Any], source: str, include_sells: bool = True) -> None:
         date_key = str(payload.get("date") or dt.date.today().isoformat())
         buy_lines: list[str] = []
         sell_lines: list[str] = []
+        buy_items: list[dict[str, Any]] = []
+        sell_items: list[dict[str, Any]] = []
         for item in payload.get("buy") or []:
             if not isinstance(item, dict) or item.get("action") != "BUY_NOW":
                 continue
@@ -1049,6 +1691,9 @@ class MainWindow(QMainWindow):
             latest = self._fmt(item.get("latest_price"))
             trigger = self._fmt(item.get("effective_trigger_price", item.get("trigger_price")))
             buy_lines.append(f"{ticker} {item.get('name', '')} 买入触发：最新 {latest} / 阈值 {trigger}")
+            popup_item = dict(item)
+            popup_item["side"] = "买入"
+            buy_items.append(popup_item)
         if include_sells:
             for item in payload.get("sell") or []:
                 if not isinstance(item, dict) or item.get("action") not in URGENT_SELL_ACTIONS:
@@ -1064,18 +1709,31 @@ class MainWindow(QMainWindow):
                 points = str(item.get("signal_points") or "").strip()
                 suffix = f" / {points}" if points else ""
                 sell_lines.append(f"{ticker} {item.get('name', '')} {action}：最新 {latest} / 盈亏 {pnl}%{suffix}")
+                popup_item = dict(item)
+                popup_item["side"] = "卖出"
+                sell_items.append(popup_item)
         if buy_lines:
             self.append_log(f"{source}买入触发：" + "、".join(line.split()[0] for line in buy_lines))
-            self.show_trade_popup(f"{source}买入触发", buy_lines, QMessageBox.Information)
+            self.show_trade_action_popup(f"{source}买入触发", buy_items, QMessageBox.Information)
         if sell_lines:
             self.append_log(f"{source}卖出触发：" + "、".join(line.split()[0] for line in sell_lines))
-            self.show_trade_popup(f"{source}卖出提醒", sell_lines, QMessageBox.Warning)
+            self.show_trade_action_popup(f"{source}卖出提醒", sell_items, QMessageBox.Warning)
 
     def refresh_positions(self) -> None:
         with connect(self.db_path) as conn:
             positions = list_positions(conn)
         self.positions_table.setRowCount(len(positions))
         for row_index, position in enumerate(positions):
+            latest_price = self.position_latest_price(position)
+            protection = calculate_profit_protection_result(
+                cost_price=position.buy_price,
+                latest_price=latest_price,
+                target_price=position.target_price,
+                hard_stop_price=position.hard_stop_price,
+                trailing_stop_pct=position.trailing_stop_pct,
+                highest_price=position.highest_price,
+                management_state=position.management_state,
+            )
             values = [
                 position.ticker,
                 position.name,
@@ -1084,9 +1742,14 @@ class MainWindow(QMainWindow):
                 self._fmt(position.buy_price),
                 self._fmt(position.shares),
                 self._fmt(position.target_price),
+                self._fmt(protection.latest_price),
+                f"{self._fmt(protection.current_gain_pct)}%",
+                self._fmt(protection.first_manage_price),
+                self._fmt(protection.protection_price),
                 self._fmt(position.hard_stop_price),
                 self._fmt(position.trailing_stop_pct),
                 self._fmt(position.highest_price),
+                protection.summary,
                 position.management_state,
                 position.status,
                 position.notes,
@@ -1094,8 +1757,24 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setData(Qt.UserRole, position.id)
+                if column == POSITION_COLUMNS.index("代码"):
+                    item.setToolTip("点击复制股票代码并跳转国盛睿")
+                    item.setForeground(QBrush(QColor("#2158a8")))
+                elif column == POSITION_COLUMNS.index("名称"):
+                    item.setToolTip("点击打开雪球页面")
+                    item.setForeground(QBrush(QColor("#2158a8")))
                 self.positions_table.setItem(row_index, column, item)
         self.positions_table.resizeColumnsToContents()
+
+    def position_latest_price(self, position: Position) -> float:
+        market_match = re.search(r"市值\s*([0-9.]+)", str(position.notes or ""))
+        if market_match and position.shares > 0:
+            market_value = self._float(market_match.group(1))
+            if market_value > 0:
+                return market_value / position.shares
+        if position.highest_price > 0:
+            return position.highest_price
+        return position.buy_price
 
     def on_position_selected(self) -> None:
         items = self.positions_table.selectedItems()
@@ -1105,7 +1784,8 @@ class MainWindow(QMainWindow):
         first = self.positions_table.item(row, 0)
         self.selected_position_id = int(first.data(Qt.UserRole)) if first and first.data(Qt.UserRole) else None
         keys = list(self.position_inputs)
-        for column, key in enumerate(keys):
+        for key in keys:
+            column = POSITION_COLUMNS.index(POSITION_FIELD_COLUMNS[key])
             item = self.positions_table.item(row, column)
             self.position_inputs[key].setText(item.text() if item else "")
 
@@ -1117,9 +1797,18 @@ class MainWindow(QMainWindow):
 
     def save_position_from_form(self) -> None:
         row = {key: edit.text().strip() for key, edit in self.position_inputs.items()}
+        position_id = self.selected_position_id
+        ticker = self.normalize_ticker(row["ticker"])
+        if position_id and ticker:
+            with connect(self.db_path) as conn:
+                existing = next((item for item in list_positions(conn) if item.id == position_id), None)
+            if existing and self.normalize_ticker(existing.ticker) != ticker:
+                position_id = None
+                self.selected_position_id = None
+                self.append_log(f"检测到表单代码从 {existing.ticker} 改为 {ticker}，按新持仓保存")
         position = Position(
-            id=self.selected_position_id,
-            ticker=row["ticker"],
+            id=position_id,
+            ticker=ticker or row["ticker"],
             name=row["name"],
             buy_date=row["buy_date"],
             buy_time=row["buy_time"],
@@ -1161,6 +1850,17 @@ class MainWindow(QMainWindow):
             count = import_positions_csv(conn, Path(path))
         self.refresh_positions()
         QMessageBox.information(self, "导入完成", f"已导入 {count} 条持仓。")
+
+    def sync_positions_from_guoshengrui(self) -> None:
+        result = export_guoshengrui_holdings()
+        if not result.ok:
+            QMessageBox.warning(self, "国盛睿持仓同步失败", result.message)
+            self.append_log(result.message)
+            return
+        summary = sync_holdings_to_sqlite(self.db_path, result)
+        self.refresh_positions()
+        self.append_log(summary.message)
+        QMessageBox.information(self, "国盛睿持仓同步完成", summary.message)
 
     def start_scan(self, phase_override: str | None = None, trigger_reason: str = "手动") -> None:
         if self.scan_worker and self.scan_worker.isRunning():

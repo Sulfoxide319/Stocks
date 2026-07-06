@@ -22,7 +22,7 @@ function Copy-DirectoryContent {
     )
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     $excludeDirs = @(".git", ".github", ".xueqiu-edge-profile", "__pycache__", "node_modules", "output", "outputs", "dist", "release_tmp")
-    $excludeFiles = @("*.pyc", "*.pyo", "*.log")
+    $excludeFiles = @("*.pyc", "*.pyo", "*.log", "broker_account_snapshot.json", "live_positions.csv", "ui_settings.json", "xueqiu_cookie.txt")
     $args = @($Source, $Destination, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
     foreach ($dir in $excludeDirs) {
         $args += @("/XD", (Join-Path $Source $dir))
@@ -34,6 +34,17 @@ function Copy-DirectoryContent {
     if ($LASTEXITCODE -gt 7) {
         throw "robocopy failed with exit code $LASTEXITCODE"
     }
+}
+
+function Test-UserOwnedPath {
+    param([string]$RelativePath)
+    $normalized = $RelativePath.Replace("/", "\").TrimStart("\").ToLowerInvariant()
+    return $normalized -in @(
+        "config\broker_account_snapshot.json",
+        "config\live_positions.csv",
+        "config\ui_settings.json",
+        "config\xueqiu_cookie.txt"
+    )
 }
 
 function Get-FileSha256 {
@@ -53,9 +64,13 @@ function Copy-ChangedManagedFiles {
     $copied = 0
     $targets = @{}
     foreach ($file in $Manifest.files) {
+        $relativeTarget = [string]$file.target
+        $targets[$relativeTarget] = $true
+        if (Test-UserOwnedPath $relativeTarget) {
+            continue
+        }
         $source = Join-Path $PackageRoot ([string]$file.source)
-        $target = Join-Path $InstallDir ([string]$file.target)
-        $targets[[string]$file.target] = $true
+        $target = Join-Path $InstallDir $relativeTarget
         if (-not (Test-Path $source)) {
             throw "Package file was not found: $source"
         }
@@ -74,6 +89,9 @@ function Copy-ChangedManagedFiles {
             foreach ($oldFile in $previous.files) {
                 $oldTarget = [string]$oldFile.target
                 if (-not $targets.ContainsKey($oldTarget)) {
+                    if (Test-UserOwnedPath $oldTarget) {
+                        continue
+                    }
                     $oldPath = Join-Path $InstallDir $oldTarget
                     if (Test-Path $oldPath) {
                         Remove-Item -Force -LiteralPath $oldPath

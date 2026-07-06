@@ -24,6 +24,7 @@ run_trading_app.bat
 - Candidate trigger adjustment, near-threshold distance, normal interval, and fast interval are configurable in the left sidebar. Near-threshold candidates automatically switch monitoring to the fast interval.
 - The default near-threshold baseline is `0.25%`, with a dynamic lower bound of 3 A-share ticks. This is based on local mainboard 5-minute cache statistics where median 5-minute absolute movement was about `0.18%` and median 10-minute movement was about `0.24%`.
 - Buy triggers and urgent sell actions show a topmost popup, with same-day duplicate alerts suppressed.
+- Popup rows include a Guoshengrui trade shortcut. It opens the matched ticker via the chart right-click flash order menu. Buy-side rows can fill the calculated quantity from scanned or manually entered account total assets, while available cash remains the buy cap; it never fills price or submits an order.
 - The sidebar quick position entry writes ticker, buy price, and share count directly into the local SQLite position store.
 - Daily history scans fall back to BaoStock after repeated Yahoo 403 responses, so restricted Yahoo access does not stall the whole stock pool scan.
 - Weekend/manual scans use the closed-market daily path instead of intraday quote fallback; `QUOTE_ONLY` rows keep reference trigger/target/stop prices but still block buy confirmation until 5-minute/VWAP data exists.
@@ -44,13 +45,15 @@ run_trading_app.bat
   - `总览`: buy and sell advice together.
   - `买入`: only buy-side candidates and triggers.
   - `卖出/持仓`: registered positions and sell-side rules.
-- Detail panel: click any row to see the trigger/cost, target, stop, edge, PnL, and reason.
+- Detail panel: click any row to see the trigger/cost, target, stop, edge, PnL, and reason. Click a stock code to copy it and jump Guoshengrui to that ticker; click a stock name to open Xueqiu.
+- `单股分析`: enter any 6-digit ticker to calculate a standalone buy/hold/sell diagnosis. With no cost it shows buy trigger, VWAP confirmation, sizing, target upper, first management line, hard stop, trailing-stop reference, and hit-rate context. With a cost it also evaluates the current holding against hard stop, target upper, first management, trailing stop, VWAP weakness, and pre-close risk rules.
 - Action buttons:
   - `启动`: run automatically in trading windows.
   - `停止`: stop automatic scans.
   - `立即扫描`: run one scan now.
   - `打开最新计划`: open the Markdown report.
   - `编辑持仓 CSV`: open or create the local position file.
+  - `扫描国盛睿持仓`: export the Guoshengrui funds/positions view, import the visible positions into the local position store, and update account cash, holdings value, and total-assets defaults for the budget system.
   - `测试弹窗`: verify popup and sound behavior.
 
 ## Popup Actions
@@ -63,6 +66,8 @@ run_trading_app.bat
 - `PRE_CLOSE_REDUCE`: reduce weak position before close
 
 `HOLD_T1`, `HOLD`, `WAIT`, and `WATCH_BUY` stay in the main window but do not trigger a popup.
+
+Popup trade shortcuts are manual-execution helpers only. They copy the ticker, open Guoshengrui, and open the flash buy/sell window from the ticker chart. Buy quantity may be filled from the budget system; final ticker, price, quantity review, and submission stay with the user.
 
 ## Nightly Publish
 

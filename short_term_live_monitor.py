@@ -934,7 +934,16 @@ def main() -> int:
         "QUOTE_ONLY": 0,
         "DATA_UNAVAILABLE": 0,
     }
-    candidates.sort(key=lambda item: (action_rank.get(item.action, 1), item.suggested_capital_pct, item.edge_score, item.score), reverse=True)
+    candidates.sort(
+        key=lambda item: (
+            action_rank.get(item.action, 1),
+            item.position_quality_score,
+            item.score,
+            item.suggested_capital_pct,
+            item.edge_score,
+        ),
+        reverse=True,
+    )
     candidates = candidates[: args.top]
     data_unavailable = args.mode == "intraday" and candidates and all(item.action == "DATA_UNAVAILABLE" for item in candidates)
     quote_only = args.mode == "intraday" and candidates and any(item.action == "QUOTE_ONLY" for item in candidates)

@@ -21,6 +21,7 @@ from dependency_bootstrap import ensure_project_dependencies
 ensure_project_dependencies()
 
 from baostock_intraday import BaoStock5mClient
+from broker_position_sync import calculate_holding_management_lines, calculate_profit_protection_result
 from trading_journal import archive_trading_day, record_assistant_run
 from app_storage import connect as connect_app_storage
 from app_storage import default_db_path, export_open_positions_csv, save_latest_snapshot, update_positions_from_csv
@@ -121,6 +122,7 @@ class BuyAdvice:
     capital_factor: float
     suggested_capital_pct: float
     capital_reason: str
+    score: float
     edge_score: float
     reason: str
     buy_enabled: bool = True
@@ -486,6 +488,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         capital_factor = parse_float(row.get("capital_factor"), 1.0)
         suggested_capital_pct = parse_float(row.get("suggested_capital_pct"), 0.0)
         capital_reason = row.get("capital_reason", "") or ""
+        score = parse_float(row.get("score"), 0.0)
         hard_stop_price = ref_price * (1 - stop_pct / 100) if ref_price else 0.0
         if action == "DATA_UNAVAILABLE":
             priority = 9
@@ -569,12 +572,22 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
                 capital_factor=capital_factor,
                 suggested_capital_pct=suggested_capital_pct,
                 capital_reason=capital_reason,
+                score=score,
                 edge_score=parse_float(row.get("edge_score")),
                 reason=reason,
                 buy_enabled=buy_enabled,
             )
         )
-    return sorted(advices, key=lambda item: (item.priority, -item.edge_score))
+    return sorted(
+        advices,
+        key=lambda item: (
+            item.priority,
+            -item.position_quality_score,
+            -item.score,
+            -item.suggested_capital_pct,
+            -item.edge_score,
+        ),
+    )
 
 
 def load_positions(path: Path) -> list[dict[str, str]]:
@@ -607,7 +620,13 @@ def latest_vwap_for_position(client: BaoStock5mClient, ticker: str, today: dt.da
     return latest, vwap, high, bars[-1].time.isoformat(timespec="minutes")
 
 
-def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions_path: Path) -> list[SellAdvice]:
+def build_sell_advice(
+    positions: list[dict[str, str]],
+    today: dt.date,
+    positions_path: Path,
+    *,
+    write_back: bool = True,
+) -> list[SellAdvice]:
     advices: list[SellAdvice] = []
     if not positions:
         return advices
@@ -647,10 +666,59 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                 )
                 continue
             highest = max(previous_highest, intraday_high, latest)
-            trailing_stop_price = highest * (1 - trailing_stop_pct / 100) if highest > buy_price else 0.0
             if highest != previous_highest:
                 row["highest_price"] = f"{highest:.4f}"
                 changed = True
+            lines = calculate_holding_management_lines(
+                cost_price=buy_price,
+                latest_price=latest,
+                previous_target_price=target_price,
+                previous_hard_stop_price=hard_stop_price,
+                previous_highest_price=highest,
+                trailing_stop_pct=trailing_stop_pct,
+                previous_management_state=current_state,
+                first_manage_hit_at=row.get("first_manage_hit_at", ""),
+                profit_protected_at=row.get("profit_protected_at", ""),
+                source_notes=row.get("notes", ""),
+                timestamp=f"{today.isoformat()}T{latest_time or '00:00:00'}",
+            )
+            if target_price != lines.target_price:
+                row["target_price"] = f"{lines.target_price:.4f}"
+                target_price = lines.target_price
+                changed = True
+            if hard_stop_price != lines.hard_stop_price:
+                row["hard_stop_price"] = f"{lines.hard_stop_price:.4f}"
+                hard_stop_price = lines.hard_stop_price
+                changed = True
+            if trailing_stop_pct != lines.trailing_stop_pct:
+                row["trailing_stop_pct"] = f"{lines.trailing_stop_pct:.4f}"
+                trailing_stop_pct = lines.trailing_stop_pct
+                changed = True
+            if highest != lines.highest_price:
+                row["highest_price"] = f"{lines.highest_price:.4f}"
+                highest = lines.highest_price
+                changed = True
+            if row.get("management_state", "") != lines.management_state:
+                row["management_state"] = lines.management_state
+                current_state = lines.management_state
+                changed = True
+            if row.get("first_manage_hit_at", "") != lines.first_manage_hit_at:
+                row["first_manage_hit_at"] = lines.first_manage_hit_at
+                changed = True
+            if row.get("profit_protected_at", "") != lines.profit_protected_at:
+                row["profit_protected_at"] = lines.profit_protected_at
+                changed = True
+            first_manage_price = first_manage_price_from_position(buy_price, target_price)
+            protection = calculate_profit_protection_result(
+                cost_price=buy_price,
+                latest_price=latest,
+                target_price=target_price,
+                hard_stop_price=hard_stop_price,
+                trailing_stop_pct=trailing_stop_pct,
+                highest_price=highest,
+                management_state=current_state,
+            )
+            trailing_stop_price = protection.trailing_stop_price
             pnl_pct = (latest / buy_price - 1) * 100 if buy_price else 0.0
             same_day = buy_date == today.isoformat()
             first_manage_hit = first_manage_price > 0 and highest >= first_manage_price
@@ -661,11 +729,19 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                 if first_manage_hit:
                     reason += f"；已触及第一管理线 {first_manage_price:.2f}，明日优先保护利润"
             elif hard_stop_price > 0 and latest <= hard_stop_price:
-                action = "SELL_NOW"
-                reason = f"跌破硬止损 {hard_stop_price:.2f}"
+                if first_manage_hit or current_state in {"FIRST_MANAGE_HIT", "PROFIT_PROTECTED", "REDUCED"}:
+                    action = "REDUCE_PROFIT"
+                    reason = protection.summary
+                else:
+                    action = "SELL_NOW"
+                    reason = f"跌破硬止损 {hard_stop_price:.2f}"
             elif target_price > 0 and latest >= target_price:
-                action = "TAKE_PROFIT"
-                reason = f"达到目标上沿 {target_price:.2f}"
+                if first_manage_hit or current_state in {"FIRST_MANAGE_HIT", "PROFIT_PROTECTED", "REDUCED"}:
+                    action = "MANAGE_PROFIT"
+                    reason = protection.summary
+                else:
+                    action = "TAKE_PROFIT"
+                    reason = f"达到目标上沿 {target_price:.2f}"
             elif first_manage_hit and vwap > 0 and latest < vwap and latest_time >= "09:45":
                 if clean_text(row.get("last_signal_action")) == "VWAP_WEAK_CONFIRM":
                     action = "REDUCE_PROFIT"
@@ -675,14 +751,14 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                     reason = f"已触及第一管理线 {first_manage_price:.2f}，首次跌回VWAP {vwap:.2f} 下方，先确认一轮；若下一次扫描仍弱再减仓"
             elif first_manage_hit and trailing_stop_price > 0 and latest <= trailing_stop_price:
                 action = "REDUCE_PROFIT"
-                reason = f"已触及第一管理线 {first_manage_price:.2f}，从持仓高点 {highest:.2f} 回撤超过 {trailing_stop_pct:.1f}%，提示保护利润/减仓"
+                reason = protection.summary
             elif first_manage_price > 0 and latest >= first_manage_price:
                 if current_state == "OPEN":
                     action = "MANAGE_PROFIT"
                     reason = f"达到第一管理线 {first_manage_price:.2f}，不强制卖出；建议上移止损、盯VWAP，允许手动减仓"
                 else:
                     action = "HOLD_MANAGED"
-                    reason = f"已处于{current_state}状态，继续按第一管理线 {first_manage_price:.2f} 后的移动止盈/VWAP规则管理"
+                    reason = protection.summary
             elif trailing_stop_price > 0 and latest <= trailing_stop_price:
                 action = "TRAIL_SELL"
                 reason = f"从日内/持仓高点 {highest:.2f} 回落超过 {trailing_stop_pct:.1f}%"
@@ -727,7 +803,7 @@ def build_sell_advice(positions: list[dict[str, str]], today: dt.date, positions
                     reason=reason,
                 )
             )
-    if changed:
+    if changed and write_back:
         write_positions(positions_path, positions)
     return sorted(advices, key=lambda item: item.action not in URGENT_SELL_ACTIONS)
 
@@ -765,13 +841,13 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
             "",
             "## 再看买入",
             "",
-            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 建议资金 | 质量 | 目标上沿 | 第一管理线 | 止损价 | 可卖上沿 | 触及上沿 | 管理线 | N | 样本桶 | Edge | 理由 |",
-            "|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
+            "| 动作 | 代码 | 名称 | 最新/参考 | 触发价 | VWAP | 建议资金 | 质量 | 分数 | 目标上沿 | 第一管理线 | 止损价 | 可卖上沿 | 触及上沿 | 管理线 | N | 样本桶 | Edge | 理由 |",
+            "|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
         ]
     )
     for item in buy_advices[:20]:
         quality_text = f"{item.position_quality_grade or '-'}/{item.position_quality_score:.2f}"
-        lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.latest_price:.2f} | {item.trigger_price:.2f} | {item.vwap:.2f} | {item.suggested_capital_pct:.1f}% | {quality_text} | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.hard_stop_price:.2f} | {format_rate_pct(item.target_upper_hit_rate_pct)} | {format_rate_pct(item.target_upper_touch_rate_pct)} | {format_rate_pct(item.first_manage_hit_rate_pct)} | {item.hit_rate_sample_size} | {item.hit_rate_bucket or '-'} | {item.edge_score:.2f} | {item.reason} |")
+        lines.append(f"| {item.action} | {item.ticker} | {item.name} | {item.latest_price:.2f} | {item.trigger_price:.2f} | {item.vwap:.2f} | {item.suggested_capital_pct:.1f}% | {quality_text} | {item.score:.1f} | {item.target_price:.2f} | {item.first_manage_price:.2f} | {item.hard_stop_price:.2f} | {format_rate_pct(item.target_upper_hit_rate_pct)} | {format_rate_pct(item.target_upper_touch_rate_pct)} | {format_rate_pct(item.first_manage_hit_rate_pct)} | {item.hit_rate_sample_size} | {item.hit_rate_bucket or '-'} | {item.edge_score:.2f} | {item.reason} |")
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
@@ -787,13 +863,13 @@ def write_reports(out_dir: Path, today: dt.date, phase: str, mode: str, buy_advi
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "suggested_capital_pct", "position_quality_score", "position_quality_grade", "capital_factor", "capital_reason", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "management_state", "previous_management_state", "target_upper_hit_rate_pct", "target_upper_touch_rate_pct", "first_manage_hit_rate_pct", "hit_rate_sample_size", "hit_rate_source", "hit_rate_bucket", "hit_rate_warning", "pnl_pct", "signal_points", "reason"]
+        fieldnames = ["side", "action", "ticker", "name", "latest_price", "trigger_or_cost", "suggested_capital_pct", "position_quality_score", "position_quality_grade", "score", "edge_score", "capital_factor", "capital_reason", "target_price", "first_manage_price", "trailing_stop_price", "hard_stop_price", "vwap_fail_price", "management_state", "previous_management_state", "target_upper_hit_rate_pct", "target_upper_touch_rate_pct", "first_manage_hit_rate_pct", "hit_rate_sample_size", "hit_rate_source", "hit_rate_bucket", "hit_rate_warning", "pnl_pct", "signal_points", "reason"]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for item in sell_advices:
-            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "suggested_capital_pct": "", "position_quality_score": "", "position_quality_grade": "", "capital_factor": "", "capital_reason": "", "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": item.trailing_stop_price, "hard_stop_price": item.hard_stop_price, "vwap_fail_price": item.vwap_fail_price, "management_state": item.management_state, "previous_management_state": item.previous_management_state, "target_upper_hit_rate_pct": "", "target_upper_touch_rate_pct": "", "first_manage_hit_rate_pct": "", "hit_rate_sample_size": "", "hit_rate_source": "", "hit_rate_bucket": "", "hit_rate_warning": "", "pnl_pct": item.pnl_pct, "signal_points": item.signal_points, "reason": item.reason})
+            writer.writerow({"side": "sell", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.buy_price, "suggested_capital_pct": "", "position_quality_score": "", "position_quality_grade": "", "score": "", "edge_score": "", "capital_factor": "", "capital_reason": "", "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": item.trailing_stop_price, "hard_stop_price": item.hard_stop_price, "vwap_fail_price": item.vwap_fail_price, "management_state": item.management_state, "previous_management_state": item.previous_management_state, "target_upper_hit_rate_pct": "", "target_upper_touch_rate_pct": "", "first_manage_hit_rate_pct": "", "hit_rate_sample_size": "", "hit_rate_source": "", "hit_rate_bucket": "", "hit_rate_warning": "", "pnl_pct": item.pnl_pct, "signal_points": item.signal_points, "reason": item.reason})
         for item in buy_advices:
-            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "suggested_capital_pct": item.suggested_capital_pct, "position_quality_score": item.position_quality_score, "position_quality_grade": item.position_quality_grade, "capital_factor": item.capital_factor, "capital_reason": item.capital_reason, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": "", "hard_stop_price": item.hard_stop_price, "vwap_fail_price": "", "management_state": "", "previous_management_state": "", "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "target_upper_touch_rate_pct": item.target_upper_touch_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "hit_rate_sample_size": item.hit_rate_sample_size, "hit_rate_source": item.hit_rate_source, "hit_rate_bucket": item.hit_rate_bucket, "hit_rate_warning": item.hit_rate_warning, "pnl_pct": "", "signal_points": "", "reason": item.reason})
+            writer.writerow({"side": "buy", "action": item.action, "ticker": item.ticker, "name": item.name, "latest_price": item.latest_price, "trigger_or_cost": item.trigger_price, "suggested_capital_pct": item.suggested_capital_pct, "position_quality_score": item.position_quality_score, "position_quality_grade": item.position_quality_grade, "score": item.score, "edge_score": item.edge_score, "capital_factor": item.capital_factor, "capital_reason": item.capital_reason, "target_price": item.target_price, "first_manage_price": item.first_manage_price, "trailing_stop_price": "", "hard_stop_price": item.hard_stop_price, "vwap_fail_price": "", "management_state": "", "previous_management_state": "", "target_upper_hit_rate_pct": item.target_upper_hit_rate_pct, "target_upper_touch_rate_pct": item.target_upper_touch_rate_pct, "first_manage_hit_rate_pct": item.first_manage_hit_rate_pct, "hit_rate_sample_size": item.hit_rate_sample_size, "hit_rate_source": item.hit_rate_source, "hit_rate_bucket": item.hit_rate_bucket, "hit_rate_warning": item.hit_rate_warning, "pnl_pct": "", "signal_points": "", "reason": item.reason})
 
     shutil.copyfile(report, out_dir / "latest_plan.md")
     shutil.copyfile(json_path, out_dir / "latest_plan.json")

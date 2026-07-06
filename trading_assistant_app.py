@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import csv
 import json
 import os
 import queue
 import subprocess
 import sys
 import threading
+import webbrowser
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, X, Y, Canvas, Frame, IntVar, Label, StringVar, Tk, Toplevel, messagebox
 from tkinter import font as tkfont
@@ -19,6 +21,12 @@ from dependency_bootstrap import ensure_project_dependencies
 
 ensure_project_dependencies()
 
+from broker_position_sync import sync_holdings_to_csv
+from guoshengrui_bridge import (
+    export_guoshengrui_holdings,
+    open_guoshengrui_for_ticker as jump_guoshengrui_for_ticker,
+    open_guoshengrui_trade_for_ticker as jump_guoshengrui_trade_for_ticker,
+)
 from local_trading_assistant import next_sleep_seconds, phase_for_time
 
 
@@ -61,6 +69,7 @@ class TradingAssistantApp:
         self.latest_md = self.out_dir / "latest_plan.md"
         self.positions_csv = self.cwd / "config" / "live_positions.csv"
         self.positions_example = self.cwd / "config" / "live_positions.example.csv"
+        self.account_snapshot_path = self.cwd / "config" / "broker_account_snapshot.json"
         self.ui_settings_path = self.cwd / "config" / "ui_settings.json"
         self.install_dir = self.resolve_install_dir()
         self.version = self.read_app_version()
@@ -79,6 +88,8 @@ class TradingAssistantApp:
         self.detail_body_label: Label | None = None
         self.sidebar: ttk.Frame | None = None
         self.fonts: dict[str, tkfont.Font] = {}
+        self._closing = False
+        self._process_queue_after_id: str | None = None
 
         self.status = StringVar(value="待机")
         self.phase_text = StringVar(value="阶段：-")
@@ -105,7 +116,8 @@ class TradingAssistantApp:
         self.configure_style()
         self.build_ui()
         self.load_cached_scan_result()
-        self.root.after(250, self.process_queue)
+        self.root.bind("<Destroy>", self.on_root_destroy, add="+")
+        self.schedule_process_queue()
 
     def place_trade_popup(self, popup: Toplevel) -> None:
         self.root.update_idletasks()
@@ -313,15 +325,26 @@ class TradingAssistantApp:
         actions = ttk.LabelFrame(parent, text="操作", padding=10)
         actions.grid(row=2, column=0, sticky="ew", pady=(2, 10))
         actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
         button_specs = [
             ("open_latest", "打开最新计划", self.open_latest_plan),
             ("positions", "编辑持仓 CSV", self.open_positions),
+            ("sync_broker_positions", "扫描国盛睿持仓", self.sync_positions_from_guoshengrui),
             ("update", "检查更新", self.check_update),
             ("test_alert", "测试弹窗", self.test_alert),
         ]
-        for row, (key, text, command) in enumerate(button_specs):
+        for index, (key, text, command) in enumerate(button_specs):
+            row = index // 2
+            column = index % 2
             button = ttk.Button(actions, text=text, command=command, style="Quiet.TButton")
-            button.grid(row=row, column=0, sticky="ew", pady=(0, 8 if row < len(button_specs) - 1 else 0), ipady=4)
+            button.grid(
+                row=row,
+                column=column,
+                sticky="ew",
+                padx=(0, 6) if column == 0 else (6, 0),
+                pady=(0, 8 if row < (len(button_specs) - 1) // 2 else 0),
+                ipady=4,
+            )
             self.action_buttons[key] = button
         self.update_button = self.action_buttons["update"]
 
@@ -419,7 +442,7 @@ class TradingAssistantApp:
     def create_tree(self, parent: ttk.Frame) -> ttk.Treeview:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
-        columns = ("side", "action", "ticker", "name", "latest", "trigger", "capital", "quality", "target", "first_manage", "stop", "sellable_hit", "touch_hit", "manage_hit", "samples", "sample_bucket", "pnl", "edge", "reason")
+        columns = ("side", "action", "ticker", "name", "latest", "trigger", "capital", "quality", "score", "target", "first_manage", "stop", "sellable_hit", "touch_hit", "manage_hit", "samples", "sample_bucket", "pnl", "edge", "reason")
         tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
         headings = {
             "side": "方向",
@@ -430,6 +453,7 @@ class TradingAssistantApp:
             "trigger": "触发/成本",
             "capital": "资金%",
             "quality": "质量",
+            "score": "分数",
             "target": "目标",
             "first_manage": "管理线",
             "stop": "止损",
@@ -451,6 +475,7 @@ class TradingAssistantApp:
             "trigger": 86,
             "capital": 72,
             "quality": 70,
+            "score": 58,
             "target": 76,
             "first_manage": 78,
             "stop": 76,
@@ -463,7 +488,7 @@ class TradingAssistantApp:
             "edge": 64,
             "reason": 360,
         }
-        numeric = {"latest", "trigger", "capital", "target", "first_manage", "stop", "samples", "pnl", "edge"}
+        numeric = {"latest", "trigger", "capital", "score", "target", "first_manage", "stop", "samples", "pnl", "edge"}
         for column in columns:
             tree.heading(column, text=headings[column])
             tree.column(column, width=widths[column], anchor="e" if column in numeric else "w", stretch=column == "reason")
@@ -472,6 +497,7 @@ class TradingAssistantApp:
         tree.tag_configure("hold", background=COLORS["warn_bg"], foreground=COLORS["warn"])
         tree.tag_configure("watch", background=COLORS["panel"], foreground=COLORS["ink"])
         tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.bind_stock_tree_interactions(tree)
         yscroll = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
         xscroll = ttk.Scrollbar(parent, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
@@ -609,6 +635,9 @@ class TradingAssistantApp:
         self.append_scan_log(f"已加载上次扫描结果：{generated}")
 
     def process_queue(self) -> None:
+        self._process_queue_after_id = None
+        if self._closing:
+            return
         try:
             while True:
                 kind, payload = self.event_queue.get_nowait()
@@ -624,7 +653,27 @@ class TradingAssistantApp:
                     self.on_update_done(payload if isinstance(payload, dict) else {})
         except queue.Empty:
             pass
-        self.root.after(250, self.process_queue)
+        self.schedule_process_queue()
+
+    def schedule_process_queue(self) -> None:
+        if self._closing:
+            return
+        try:
+            self._process_queue_after_id = self.root.after(250, self.process_queue)
+        except Exception:
+            self._process_queue_after_id = None
+
+    def on_root_destroy(self, event: object) -> None:
+        if getattr(event, "widget", None) is not self.root:
+            return
+        self._closing = True
+        after_id = self._process_queue_after_id
+        self._process_queue_after_id = None
+        if after_id:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
 
     def on_scan_output(self, line: str) -> None:
         if line.startswith("SCAN_PROGRESS|"):
@@ -744,6 +793,200 @@ class TradingAssistantApp:
         width = getattr(event, "width", 820)
         self.detail_body_label.configure(wraplength=max(240, int(width) - 32))
 
+    @staticmethod
+    def normalize_ticker(value: object) -> str:
+        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
+        return digits[:6]
+
+    @classmethod
+    def xueqiu_symbol(cls, value: object) -> str:
+        ticker = cls.normalize_ticker(value)
+        if not ticker:
+            return ""
+        if ticker.startswith(("6", "9")):
+            return f"SH{ticker}"
+        if ticker.startswith(("4", "8")):
+            return f"BJ{ticker}"
+        return f"SZ{ticker}"
+
+    @classmethod
+    def xueqiu_url(cls, value: object) -> str:
+        symbol = cls.xueqiu_symbol(value)
+        return f"https://xueqiu.com/S/{symbol}" if symbol else ""
+
+    @staticmethod
+    def tree_column_name(tree: ttk.Treeview, x: int) -> str:
+        column_id = tree.identify_column(x)
+        if not column_id or column_id == "#0":
+            return ""
+        try:
+            index = int(column_id.lstrip("#")) - 1
+        except ValueError:
+            return ""
+        columns = list(tree["columns"])
+        return str(columns[index]) if 0 <= index < len(columns) else ""
+
+    @staticmethod
+    def tree_ticker(tree: ttk.Treeview, item_id: str) -> str:
+        columns = list(tree["columns"])
+        values = list(tree.item(item_id, "values") or [])
+        if "ticker" not in columns:
+            return ""
+        index = columns.index("ticker")
+        return str(values[index]) if index < len(values) else ""
+
+    def copy_ticker_to_clipboard(self, ticker_text: object) -> None:
+        ticker = self.normalize_ticker(ticker_text)
+        if not ticker:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(ticker)
+        self.root.update()
+        self.append_scan_log(f"已复制股票代码，正在跳转国盛睿：{ticker}")
+        result = jump_guoshengrui_for_ticker(ticker)
+        self.append_scan_log(result.message)
+        if not result.ok and result.code in {"missing_executable", "no_window", "dangerous_foreground"}:
+            messagebox.showwarning("国盛睿跳转", result.message)
+
+    def open_xueqiu_for_ticker(self, ticker_text: object) -> None:
+        symbol = self.xueqiu_symbol(ticker_text)
+        if not symbol:
+            return
+        webbrowser.open_new_tab(f"https://xueqiu.com/S/{symbol}")
+        self.append_scan_log(f"已打开雪球：{symbol}")
+
+    @staticmethod
+    def trade_side_from_text(side_text: object, action_text: object = "") -> str:
+        side = str(side_text or "")
+        action = str(action_text or "")
+        if side == "买入" or action == "BUY_NOW":
+            return "buy"
+        return "sell"
+
+    @staticmethod
+    def parse_float(value: object, default: float = 0.0) -> float:
+        try:
+            text = str(value or "").replace(",", "").replace("%", "").strip()
+            if not text:
+                return default
+            return float(text)
+        except (TypeError, ValueError):
+            return default
+
+    def load_broker_account_snapshot(self) -> dict[str, float]:
+        try:
+            data = json.loads(self.account_snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"cash_available": 0.0, "holdings_value": 0.0, "total_assets": 0.0}
+        cash_available = self.parse_float(data.get("cash_available"))
+        holdings_value = self.parse_float(data.get("holdings_value"))
+        total_assets = self.parse_float(data.get("total_assets"), cash_available + holdings_value)
+        if total_assets <= 0:
+            total_assets = cash_available + holdings_value
+        return {
+            "cash_available": cash_available,
+            "holdings_value": holdings_value,
+            "total_assets": total_assets,
+        }
+
+    def open_position_shares(self, ticker_text: object) -> float:
+        ticker = self.normalize_ticker(ticker_text)
+        if not ticker or not self.positions_csv.exists():
+            return 0.0
+        try:
+            with self.positions_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = csv.DictReader(handle)
+                total = 0.0
+                for row in rows:
+                    if self.normalize_ticker(row.get("ticker")) != ticker:
+                        continue
+                    if str(row.get("status") or "open").strip().lower() == "closed":
+                        continue
+                    total += self.parse_float(row.get("shares"))
+                return total
+        except Exception:
+            return 0.0
+
+    def open_trade_terminal_for_tree_selection(
+        self,
+        tree: ttk.Treeview,
+        item_by_iid: dict[str, dict[str, object]] | None = None,
+        cash_var: StringVar | None = None,
+        holdings_var: StringVar | None = None,
+        total_var: StringVar | None = None,
+    ) -> None:
+        selected = tree.selection()
+        if not selected:
+            messagebox.showinfo("交易界面跳转", "请先选中一条买入或卖出提醒。")
+            return
+        selected_id = str(selected[0])
+        source_item = item_by_iid.get(selected_id, {}) if item_by_iid else {}
+        values = list(tree.item(selected[0], "values") or [])
+        if len(values) < 3:
+            messagebox.showwarning("交易界面跳转", "选中行缺少股票代码。")
+            return
+        side = source_item.get("side", values[0])
+        action = source_item.get("action", values[1])
+        ticker = source_item.get("ticker", values[2])
+        trade_side = self.trade_side_from_text(side, action)
+        ticker_code = self.normalize_ticker(ticker)
+        if len(ticker_code) != 6:
+            messagebox.showwarning("交易界面跳转", "股票代码必须是 6 位数字。")
+            return
+        cash_amount = self.parse_float(cash_var.get() if cash_var is not None else 0.0)
+        holdings_value = self.parse_float(holdings_var.get() if holdings_var is not None else 0.0)
+        total_assets = self.parse_float(total_var.get() if total_var is not None else 0.0)
+        if total_assets <= 0:
+            total_assets = cash_amount + holdings_value
+        reference_price = self.parse_float(source_item.get("latest_price"), self.parse_float(values[4] if len(values) > 4 else 0.0))
+        suggested_capital_pct = self.parse_float(source_item.get("suggested_capital_pct"), self.parse_float(values[6] if len(values) > 6 else 0.0))
+        self.root.clipboard_clear()
+        self.root.clipboard_append(ticker_code)
+        self.root.update()
+        result = jump_guoshengrui_trade_for_ticker(
+            ticker_code,
+            trade_side,
+            account_cash_amount=cash_amount,
+            account_holdings_value=holdings_value,
+            account_total_assets=total_assets,
+            reference_price=reference_price,
+            suggested_capital_pct=suggested_capital_pct,
+            existing_shares=self.open_position_shares(ticker_code),
+            fill_quantity=trade_side == "buy" and total_assets > 0,
+        )
+        self.append_scan_log(result.message)
+        if not result.ok:
+            messagebox.showwarning("交易界面跳转", result.message)
+
+    def bind_stock_tree_interactions(self, tree: ttk.Treeview) -> None:
+        tree.bind("<ButtonRelease-1>", self.on_stock_tree_click, add="+")
+        tree.bind("<Motion>", self.on_stock_tree_motion, add="+")
+        tree.bind("<Leave>", lambda _event: tree.configure(cursor=""), add="+")
+
+    def on_stock_tree_click(self, event: object) -> None:
+        tree = getattr(event, "widget", None)
+        if not isinstance(tree, ttk.Treeview):
+            return
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+        column = self.tree_column_name(tree, event.x)
+        ticker = self.tree_ticker(tree, item_id)
+        if column == "ticker":
+            self.copy_ticker_to_clipboard(ticker)
+        elif column == "name":
+            self.open_xueqiu_for_ticker(ticker)
+
+    def on_stock_tree_motion(self, event: object) -> None:
+        tree = getattr(event, "widget", None)
+        if not isinstance(tree, ttk.Treeview):
+            return
+        column = self.tree_column_name(tree, event.x)
+        item_id = tree.identify_row(event.y)
+        tree.configure(cursor="hand2" if item_id and column in {"ticker", "name"} else "")
+
     def row_values(self, side: str, row: dict[str, object]) -> tuple[tuple[object, ...], str]:
         action = str(row.get("action", ""))
         if side == "卖出":
@@ -755,6 +998,7 @@ class TradingAssistantApp:
                 row.get("name", ""),
                 self.fmt(row.get("latest_price")),
                 self.fmt(row.get("buy_price")),
+                "",
                 "",
                 "",
                 self.fmt(row.get("target_price")),
@@ -780,6 +1024,7 @@ class TradingAssistantApp:
                 self.fmt(row.get("trigger_price")),
                 f"{self.fmt(row.get('suggested_capital_pct'))}%",
                 f"{row.get('position_quality_grade', '')}/{self.fmt(row.get('position_quality_score'))}",
+                self.fmt(row.get("score")),
                 self.fmt(row.get("target_price")),
                 self.fmt(row.get("first_manage_price")),
                 self.fmt(row.get("hard_stop_price")),
@@ -834,7 +1079,40 @@ class TradingAssistantApp:
         panel = ttk.Frame(popup, style="Panel.TFrame", padding=16)
         panel.pack(fill=BOTH, expand=True, padx=12, pady=12)
         ttk.Label(panel, text="出现需要处理的交易动作", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(panel, text="请按你的券商交易界面确认价格和可卖数量，本程序只给建议，不自动下单。", style="Subtle.TLabel").pack(anchor="w", pady=(4, 10))
+        ttk.Label(panel, text="按钮先跳转分时图，再右键打开国盛睿闪电买/卖窗口；买入按账户总资产比例填数量，不自动下单。", style="Subtle.TLabel").pack(anchor="w", pady=(4, 10))
+        snapshot = self.load_broker_account_snapshot()
+        cash_var = StringVar(value=f"{snapshot['cash_available']:.2f}" if snapshot["cash_available"] > 0 else "")
+        holdings_var = StringVar(value=f"{snapshot['holdings_value']:.2f}" if snapshot["holdings_value"] > 0 else "")
+        total_var = StringVar(value=f"{snapshot['total_assets']:.2f}" if snapshot["total_assets"] > 0 else "")
+        if any(item.get("side") == "买入" for item in new_items):
+            account_row = ttk.Frame(panel, style="Panel.TFrame")
+            account_row.pack(fill=X, pady=(0, 10))
+
+            def update_total(*_args: object) -> None:
+                total = self.parse_float(cash_var.get()) + self.parse_float(holdings_var.get())
+                total_var.set(f"{total:.2f}" if total > 0 else "")
+
+            def scan_account_snapshot() -> None:
+                result = export_guoshengrui_holdings()
+                if not result.ok:
+                    messagebox.showwarning("账户扫描失败", result.message)
+                    self.append_scan_log(result.message)
+                    return
+                summary = sync_holdings_to_csv(self.positions_csv, result)
+                cash_var.set(f"{summary.cash_available:.2f}")
+                holdings_var.set(f"{summary.holdings_value:.2f}")
+                total_var.set(f"{summary.total_assets:.2f}")
+                self.append_scan_log(summary.message)
+
+            cash_var.trace_add("write", update_total)
+            holdings_var.trace_add("write", update_total)
+            ttk.Label(account_row, text="可用现金", style="Subtle.TLabel").pack(side=LEFT)
+            ttk.Entry(account_row, textvariable=cash_var, width=14).pack(side=LEFT, padx=(6, 12))
+            ttk.Label(account_row, text="持仓市值", style="Subtle.TLabel").pack(side=LEFT)
+            ttk.Entry(account_row, textvariable=holdings_var, width=14).pack(side=LEFT, padx=(6, 12))
+            ttk.Label(account_row, text="总资产", style="Subtle.TLabel").pack(side=LEFT)
+            ttk.Entry(account_row, textvariable=total_var, width=14).pack(side=LEFT, padx=(6, 12))
+            ttk.Button(account_row, text="扫描账户", command=scan_account_snapshot, style="Quiet.TButton").pack(side=LEFT)
         table_frame = ttk.Frame(panel, style="Panel.TFrame")
         table_frame.pack(fill=BOTH, expand=True, pady=(0, 12))
         table_frame.columnconfigure(0, weight=1)
@@ -852,18 +1130,27 @@ class TradingAssistantApp:
             tree.column(column, width=width, anchor="e" if column == "latest" else "w", stretch=column == "reason")
         tree.tag_configure("urgent", background=COLORS["sell_bg"], foreground=COLORS["sell"])
         tree.tag_configure("buy", background=COLORS["buy_bg"], foreground=COLORS["buy"])
+        self.bind_stock_tree_interactions(tree)
         yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        item_by_iid: dict[str, dict[str, object]] = {}
         for item in new_items:
             tag = "buy" if item.get("side") == "买入" else "urgent"
-            tree.insert("", END, values=(item.get("side", ""), item.get("action", ""), item.get("ticker", ""), item.get("name", ""), self.fmt(item.get("latest_price")), item.get("reason", "")), tags=(tag,))
+            iid = tree.insert("", END, values=(item.get("side", ""), item.get("action", ""), item.get("ticker", ""), item.get("name", ""), self.fmt(item.get("latest_price")), item.get("reason", "")), tags=(tag,))
+            item_by_iid[str(iid)] = dict(item)
         tree.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
         buttons = ttk.Frame(panel, style="Panel.TFrame")
         buttons.pack(fill=X)
         ttk.Button(buttons, text="打开最新计划", command=self.open_latest_plan, style="Primary.TButton").pack(side=LEFT)
+        ttk.Button(
+            buttons,
+            text="打开选中交易界面",
+            command=lambda: self.open_trade_terminal_for_tree_selection(tree, item_by_iid, cash_var, holdings_var, total_var),
+            style="Primary.TButton",
+        ).pack(side=LEFT, padx=(8, 0))
         ttk.Button(buttons, text="我知道了", command=popup.destroy, style="Quiet.TButton").pack(side=RIGHT)
         popup.focus_force()
 
@@ -877,13 +1164,14 @@ class TradingAssistantApp:
         values = tree.item(selected[0], "values")
         if not values:
             return
-        side, action, ticker, name, latest, trigger, capital, quality, target, first_manage, stop, sellable_hit, touch_hit, manage_hit, samples, sample_bucket, pnl, edge, reason = values
+        side, action, ticker, name, latest, trigger, capital, quality, score, target, first_manage, stop, sellable_hit, touch_hit, manage_hit, samples, sample_bucket, pnl, edge, reason = values
         self.detail_title.set(f"{side} {action} - {ticker} {name}")
         pieces = [
             f"最新价：{latest or '-'}",
             f"触发/成本：{trigger or '-'}",
             f"建议资金：{capital or '-'}",
             f"质量：{quality or '-'}",
+            f"分数：{score or '-'}",
             f"目标价：{target or '-'}",
             f"第一管理线：{first_manage or '-'}",
             f"止损价：{stop or '-'}",
@@ -910,6 +1198,16 @@ class TradingAssistantApp:
             os.startfile(self.positions_csv)
         else:
             messagebox.showinfo("暂无持仓文件", "没有找到 config/live_positions.csv。")
+
+    def sync_positions_from_guoshengrui(self) -> None:
+        result = export_guoshengrui_holdings()
+        if not result.ok:
+            messagebox.showwarning("国盛睿持仓同步失败", result.message)
+            self.append_scan_log(result.message)
+            return
+        summary = sync_holdings_to_csv(self.positions_csv, result)
+        self.append_scan_log(summary.message)
+        messagebox.showinfo("国盛睿持仓同步完成", summary.message)
 
     def find_updater(self) -> Path | None:
         candidates = [

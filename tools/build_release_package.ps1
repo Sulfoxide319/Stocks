@@ -17,6 +17,19 @@ $PyInstallerWork = Join-Path $TempRoot "pyinstaller_work"
 $PyInstallerDist = Join-Path $TempRoot "pyinstaller_dist"
 $DistRoot = Join-Path $Root $OutputDir
 $ZipPath = Join-Path $DistRoot "$PackageName.zip"
+$ManagedConfigPatterns = @(
+    "hit_rate_calibration.default.json",
+    "live_positions.example.csv",
+    "watchlist.*.csv",
+    "weak_catalysts.json",
+    "xueqiu_cookie.example.txt"
+)
+$UserOwnedConfigFiles = @(
+    "broker_account_snapshot.json",
+    "live_positions.csv",
+    "ui_settings.json",
+    "xueqiu_cookie.txt"
+)
 
 Remove-Item -Recurse -Force $TempRoot -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
@@ -51,11 +64,42 @@ function New-ManifestEntry {
     }
 }
 
+function Test-ManagedConfigFile {
+    param([string]$RelativePath)
+    $name = Split-Path -Leaf $RelativePath
+    if ($UserOwnedConfigFiles -contains $name) {
+        return $false
+    }
+    foreach ($pattern in $ManagedConfigPatterns) {
+        if ($name -like $pattern) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Copy-ManagedConfigFiles {
+    param(
+        [string]$SourceDir,
+        [string]$DestinationDir
+    )
+    New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath $SourceDir -Recurse -File) {
+        $relative = Get-RelativePathText -Base $SourceDir -Path $file.FullName
+        if (-not (Test-ManagedConfigFile $relative)) {
+            continue
+        }
+        $target = Join-Path $DestinationDir $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -Force -LiteralPath $file.FullName -Destination $target
+    }
+}
+
 Copy-Item -Force (Join-Path $Root "installer\Install-StocksTool.ps1") (Join-Path $PackageRoot "Install-StocksTool.ps1")
 Copy-Item -Force (Join-Path $Root "installer\Update-StocksTool.ps1") (Join-Path $PackageRoot "Update-StocksTool.ps1")
 Copy-Item -Force (Join-Path $Root "installer\Start-TradingAssistant.bat") (Join-Path $PackageRoot "Start-TradingAssistant.bat")
 Copy-Item -Force (Join-Path $Root "VERSION") (Join-Path $PackageRoot "VERSION")
-Copy-Item -Recurse -Force (Join-Path $Root "config") (Join-Path $PackageRoot "config")
+Copy-ManagedConfigFiles -SourceDir (Join-Path $Root "config") -DestinationDir (Join-Path $PackageRoot "config")
 
 & python -m pip install -r (Join-Path $Root "requirements.txt")
 if ($LASTEXITCODE -ne 0) {
@@ -164,6 +208,14 @@ $updateManifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Pat
 
 Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $ZipPath -Force
+
+$auditScript = Join-Path $Root "tools\audit_release_package.py"
+if (Test-Path $auditScript) {
+    & python $auditScript $ZipPath --expected-version $Version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release package audit failed with exit code $LASTEXITCODE"
+    }
+}
 
 Write-Host "Built $ZipPath"
 exit 0
