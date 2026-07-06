@@ -189,7 +189,10 @@ def parse_float(value: object, default: float = 0.0) -> float:
     try:
         if value is None or value == "":
             return default
-        return float(value)
+        text = str(value).replace(",", "").replace("%", "").strip()
+        if not text:
+            return default
+        return float(text)
     except (TypeError, ValueError):
         return default
 
@@ -198,7 +201,10 @@ def parse_optional_float(value: object) -> float | None:
     try:
         if value is None or value == "":
             return None
-        return float(value)
+        text = str(value).replace(",", "").replace("%", "").strip()
+        if not text:
+            return None
+        return float(text)
     except (TypeError, ValueError):
         return None
 
@@ -486,7 +492,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
         position_quality_score = parse_float(row.get("position_quality_score"), 0.0)
         position_quality_grade = row.get("position_quality_grade", "") or ""
         capital_factor = parse_float(row.get("capital_factor"), 1.0)
-        suggested_capital_pct = parse_float(row.get("suggested_capital_pct"), 0.0)
+        suggested_capital_pct = min(100.0, max(0.0, parse_float(row.get("suggested_capital_pct"), 0.0)))
         capital_reason = row.get("capital_reason", "") or ""
         score = parse_float(row.get("score"), 0.0)
         hard_stop_price = ref_price * (1 - stop_pct / 100) if ref_price else 0.0
@@ -578,6 +584,7 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
                 buy_enabled=buy_enabled,
             )
         )
+    normalize_buy_advice_capital(advices)
     return sorted(
         advices,
         key=lambda item: (
@@ -588,6 +595,24 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
             -item.edge_score,
         ),
     )
+
+
+def normalize_buy_advice_capital(advices: list[BuyAdvice]) -> None:
+    eligible = [
+        item
+        for item in advices
+        if item.buy_enabled and item.suggested_capital_pct > 0 and item.action not in {"DATA_UNAVAILABLE", "QUOTE_ONLY"}
+    ]
+    for item in eligible:
+        item.suggested_capital_pct = min(100.0, max(0.0, item.suggested_capital_pct))
+    total = sum(item.suggested_capital_pct for item in eligible)
+    if total <= 100.0:
+        return
+    scale = 100.0 / total
+    for item in eligible:
+        before = item.suggested_capital_pct
+        item.suggested_capital_pct = round(before * scale, 2)
+        item.reason = f"{item.reason}；组合预算归一化：{before:.1f}%→{item.suggested_capital_pct:.1f}%"
 
 
 def load_positions(path: Path) -> list[dict[str, str]]:

@@ -8,8 +8,9 @@ from typing import Any
 
 
 MIN_CAPITAL_FACTOR = 0.70
-MAX_CAPITAL_FACTOR = 1.40
-MAX_SINGLE_POSITION_PCT = 45.0
+MAX_CAPITAL_FACTOR = 1.60
+MAX_SINGLE_POSITION_PCT = 50.0
+MAX_TOTAL_CAPITAL_PCT = 100.0
 MIN_BUCKET_SAMPLE_SIZE = 8
 
 
@@ -31,7 +32,7 @@ def as_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None or value == "":
             return default
-        return float(value)
+        return float(str(value).replace(",", "").replace("%", "").strip())
     except (TypeError, ValueError):
         return default
 
@@ -40,7 +41,7 @@ def optional_float(value: Any) -> float | None:
     try:
         if value is None or value == "":
             return None
-        return float(value)
+        return float(str(value).replace(",", "").replace("%", "").strip())
     except (TypeError, ValueError):
         return None
 
@@ -265,6 +266,7 @@ def position_sizing_for_signal(
     suggested = 100.0 / slot_count * max(0.0, market_capital_factor) * max(0.0, drawdown_capital_factor) * factor
     if max_single_position_pct > 0:
         suggested = min(max_single_position_pct, suggested)
+    suggested = min(MAX_TOTAL_CAPITAL_PCT, suggested)
     return PositionSizingResult(
         mode=normalized_mode,
         quality_score=round(quality, 4),

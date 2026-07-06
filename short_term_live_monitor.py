@@ -219,6 +219,48 @@ def first_manage_pct_from_target(target_pct: float) -> float:
     return max(0.04, target_pct * 0.4)
 
 
+def normalize_candidate_capital(candidates: list[MonitorCandidate], max_positions: int) -> list[MonitorCandidate]:
+    """Make live displayed buy budgets a portfolio plan instead of independent bets."""
+    slot_count = max(1, int(max_positions))
+    ranked = sorted(
+        [
+            (idx, item)
+            for idx, item in enumerate(candidates)
+            if item.suggested_capital_pct > 0
+            and item.action not in {"DATA_UNAVAILABLE", "QUOTE_ONLY", "NO_NEW_ENTRY", "WATCH_SCORE_ONLY"}
+        ],
+        key=lambda pair: (
+            -pair[1].position_quality_score,
+            -pair[1].score,
+            -pair[1].edge_score,
+            pair[0],
+        ),
+    )
+    selected_indexes = {idx for idx, _item in ranked[:slot_count]}
+    total = sum(max(0.0, candidates[idx].suggested_capital_pct) for idx in selected_indexes)
+    scale = 100.0 / total if total > 100.0 else 1.0
+    normalized: list[MonitorCandidate] = []
+    for idx, item in enumerate(candidates):
+        if item.suggested_capital_pct <= 0:
+            normalized.append(item)
+            continue
+        if idx not in selected_indexes:
+            normalized.append(
+                replace(
+                    item,
+                    suggested_capital_pct=0.0,
+                    capital_reason=f"{item.capital_reason}; 组合预算只分配给质量最高的前{slot_count}个候选",
+                )
+            )
+            continue
+        adjusted = round(min(100.0, max(0.0, item.suggested_capital_pct * scale)), 2)
+        reason = item.capital_reason
+        if scale < 0.9999:
+            reason = f"{reason}; 组合预算归一化，入选候选合计100%"
+        normalized.append(replace(item, suggested_capital_pct=adjusted, capital_reason=reason))
+    return normalized
+
+
 def insufficient_hit_rates(reason: str) -> HitRateStats:
     return HitRateStats(
         target_upper_hit_rate_pct=None,
@@ -538,8 +580,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-positions", type=int, default=3)
     parser.add_argument("--position-sizing-mode", choices=["equal", "score_linear", "edge_linear", "quality"], default="quality")
     parser.add_argument("--quality-capital-min-factor", type=float, default=0.70)
-    parser.add_argument("--quality-capital-max-factor", type=float, default=1.40)
-    parser.add_argument("--max-single-position-pct", type=float, default=45.0)
+    parser.add_argument("--quality-capital-max-factor", type=float, default=1.60)
+    parser.add_argument("--max-single-position-pct", type=float, default=50.0)
     parser.add_argument("--min-traded-value", type=float, default=200_000_000)
     parser.add_argument("--ma5-extension-limit", type=float, default=0.04)
     parser.add_argument("--entry-end-time", default="11:20")
@@ -945,6 +987,7 @@ def main() -> int:
         reverse=True,
     )
     candidates = candidates[: args.top]
+    candidates = normalize_candidate_capital(candidates, args.max_positions)
     data_unavailable = args.mode == "intraday" and candidates and all(item.action == "DATA_UNAVAILABLE" for item in candidates)
     quote_only = args.mode == "intraday" and candidates and any(item.action == "QUOTE_ONLY" for item in candidates)
     intraday_status = (

@@ -33,7 +33,7 @@ def as_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None or value == "":
             return default
-        return float(str(value).replace(",", "").strip())
+        return float(str(value).replace(",", "").replace("%", "").strip())
     except (TypeError, ValueError):
         return default
 
@@ -60,7 +60,8 @@ def calculate_buy_quantity(
     scanned_total_assets = max(0.0, as_float(account_total_assets)) if account_total_assets is not None else 0.0
     total_assets = scanned_total_assets if scanned_total_assets > 0 else clean_cash + clean_holdings_value
     clean_price = max(0.0, as_float(price))
-    clean_pct = max(0.0, as_float(suggested_capital_pct))
+    requested_pct = max(0.0, as_float(suggested_capital_pct))
+    clean_pct = min(100.0, requested_pct)
     clean_existing = max(0.0, as_float(existing_shares))
     broker_max_buy_shares = floor_to_lot(as_float(max_buy_shares), lot_size) if max_buy_shares is not None else None
     broker_cash_cap_value = broker_max_buy_shares * clean_price if broker_max_buy_shares is not None and clean_price > 0 else None
@@ -143,6 +144,8 @@ def calculate_buy_quantity(
         reason = "受可用现金约束"
     else:
         reason = "按总资产、建议资金占比和持仓取整"
+    if requested_pct > 100.0:
+        reason = f"{reason}；建议资金占比已从{requested_pct:.2f}%封顶到100%"
 
     return BuyQuantityPlan(
         planned_shares=planned_shares,

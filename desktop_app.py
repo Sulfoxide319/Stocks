@@ -498,7 +498,7 @@ class CandidateWatchWorker(QThread):
         try:
             if value in (None, ""):
                 return default
-            return float(value)
+            return float(str(value).replace(",", "").replace("%", "").strip())
         except (TypeError, ValueError):
             return default
 
@@ -2080,7 +2080,7 @@ class MainWindow(QMainWindow):
         try:
             if value in (None, ""):
                 return default
-            return float(value)
+            return float(str(value).replace(",", "").replace("%", "").strip())
         except (TypeError, ValueError):
             return default
 
