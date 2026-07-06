@@ -300,6 +300,64 @@ def test_alert_dedup(window: desktop_app.MainWindow) -> None:
     assert_true(calls[0][1] == ["000725"] and calls[1][1] == ["600519"], "first alert should split buy and sell popups")
 
 
+def test_live_watch_observes_disabled_buy_and_positions() -> None:
+    today = dt.date.today().isoformat()
+    payload = {
+        "date": today,
+        "generated_at": f"{today}T10:02:00",
+        "phase": "intraday",
+        "buy": [
+            {
+                "action": "WATCH_ONLY",
+                "ticker": "000001",
+                "name": "平安银行",
+                "latest_price": 10.0,
+                "trigger_price": 10.5,
+                "buy_enabled": False,
+                "reason": "观察池烟测",
+            }
+        ],
+        "sell": [
+            {
+                "action": "HOLD_NO_INTRADAY",
+                "ticker": "600000",
+                "name": "浦发银行",
+                "latest_price": 0.0,
+                "buy_price": 10.0,
+                "target_price": 12.0,
+                "first_manage_price": 10.8,
+                "hard_stop_price": 9.0,
+                "trailing_stop_price": 9.5,
+                "management_state": "OPEN",
+                "pnl_pct": 0.0,
+                "reason": "持仓监听烟测",
+            }
+        ],
+    }
+    quotes = {
+        "000001": SimpleNamespace(price=11.0, timestamp=f"{today} 10:03:00"),
+        "600000": SimpleNamespace(price=8.8, timestamp=f"{today} 10:03:00"),
+    }
+    old_fetch = desktop_app.fetch_sina_quote
+    desktop_app.fetch_sina_quote = lambda _session, ticker: quotes.get(ticker)
+    captured: dict[str, Any] = {}
+    try:
+        worker = desktop_app.CandidateWatchWorker(payload, trigger_adjust_pct=0.0, near_threshold_pct=0.25)
+        worker.finished_watch.connect(lambda result: captured.setdefault("payload", result))
+        worker.run()
+    finally:
+        desktop_app.fetch_sina_quote = old_fetch
+    result = captured.get("payload") or {}
+    buy = result["buy"][0]
+    sell = result["sell"][0]
+    summary = result["watch_summary"]
+    assert_true(buy["latest_price"] == 11.0, "disabled observation row should still refresh latest quote")
+    assert_true(buy["action"] == "WATCH_ONLY", "disabled observation row must not become BUY_NOW")
+    assert_true(sell["action"] == "SELL_NOW", "holding row should be monitored for sell triggers")
+    assert_true(summary["watched"] == 1 and summary["sell_watched"] == 1, "watch summary should include buy observations and holdings")
+    assert_true(summary["triggered"] == 0 and summary["sell_triggered"] == 1, "watch summary should keep buy/sell triggers separate")
+
+
 def main() -> int:
     temp_root = Path(tempfile.mkdtemp(prefix="stocks-functional-smoke-"))
     try:
@@ -308,6 +366,7 @@ def main() -> int:
         test_broker_sync(window)
         test_popup_interactions(app, window)
         test_alert_dedup(window)
+        test_live_watch_observes_disabled_buy_and_positions()
         window.close()
         app.processEvents()
         print("ok desktop functional smoke")

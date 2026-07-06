@@ -502,21 +502,60 @@ class CandidateWatchWorker(QThread):
         except (TypeError, ValueError):
             return default
 
+    def update_sell_item_from_quote(self, item: dict[str, Any], quote_price: float, quote_timestamp: str) -> bool:
+        latest = round(float(quote_price), 4)
+        buy_price = self._float(item.get("buy_price"), self._float(item.get("trigger_or_cost"), 0.0))
+        target = self._float(item.get("target_price"), 0.0)
+        first_manage = self._float(item.get("first_manage_price"), 0.0)
+        trailing_stop = self._float(item.get("trailing_stop_price"), 0.0)
+        hard_stop = self._float(item.get("hard_stop_price"), 0.0)
+        previous_high = self._float(item.get("highest_price"), max(buy_price, latest))
+        highest = max(previous_high, latest)
+        management_state = str(item.get("management_state") or "OPEN").upper()
+        protected = management_state in {"FIRST_MANAGE_HIT", "PROFIT_PROTECTED", "REDUCED"}
+        pnl_pct = (latest / buy_price - 1.0) * 100 if buy_price > 0 else 0.0
+        item["latest_price"] = latest
+        item["highest_price"] = round(highest, 4)
+        item["pnl_pct"] = round(pnl_pct, 2)
+        item["watched_at"] = quote_timestamp or dt.datetime.now().isoformat(timespec="seconds")
+        urgent = False
+        if hard_stop > 0 and latest <= hard_stop:
+            item["action"] = "REDUCE_PROFIT" if protected else "SELL_NOW"
+            item["reason"] = f"监听：最新 {latest:.2f} <= 硬止损 {hard_stop:.2f}"
+            urgent = True
+        elif target > 0 and latest >= target:
+            item["action"] = "MANAGE_PROFIT" if protected else "TAKE_PROFIT"
+            item["reason"] = f"监听：最新 {latest:.2f} >= 目标上沿 {target:.2f}"
+            urgent = True
+        elif trailing_stop > 0 and latest <= trailing_stop:
+            item["action"] = "REDUCE_PROFIT" if protected else "TRAIL_SELL"
+            item["reason"] = f"监听：最新 {latest:.2f} <= 移动止盈 {trailing_stop:.2f}"
+            urgent = True
+        elif first_manage > 0 and latest >= first_manage:
+            item["action"] = "MANAGE_PROFIT" if protected else "HOLD_MANAGED"
+            item["management_state"] = "FIRST_MANAGE_HIT" if management_state == "OPEN" else management_state
+            item["reason"] = f"监听：最新 {latest:.2f} >= 第一管理线 {first_manage:.2f}，进入利润管理"
+        else:
+            if str(item.get("action") or "") == "HOLD_NO_INTRADAY":
+                item["action"] = "HOLD"
+            item["reason"] = f"监听：{quote_timestamp} 最新 {latest:.2f}，持仓未触发卖点"
+        return urgent
+
     def run(self) -> None:
         try:
             now = dt.datetime.now()
             session = __import__("requests").Session()
             buys = [item for item in self.payload.get("buy") or [] if isinstance(item, dict) and item.get("ticker")]
+            sells = [item for item in self.payload.get("sell") or [] if isinstance(item, dict) and item.get("ticker")]
             watched = 0
             triggered = 0
             near_threshold = 0
             unavailable = 0
+            sell_watched = 0
+            sell_triggered = 0
+            sell_unavailable = 0
             closest_distance_pct: float | None = None
-            for item in buys[: self.limit]:
-                if item.get("buy_enabled") is False:
-                    item["action"] = "WATCH_BUY"
-                    item["reason"] = "监听：观察池标的低于买入分数线，仅跟踪，不触发买入"
-                    continue
+            for item in buys:
                 quote = fetch_sina_quote(session, str(item.get("ticker") or ""))
                 if not quote:
                     unavailable += 1
@@ -534,6 +573,12 @@ class CandidateWatchWorker(QThread):
                 item["effective_trigger_price"] = round(trigger, 4)
                 item["effective_near_threshold_pct"] = round(effective_near_pct, 4)
                 item["watched_at"] = quote.timestamp or now.isoformat(timespec="seconds")
+                if item.get("buy_enabled") is False:
+                    if 0 <= distance_pct <= effective_near_pct:
+                        near_threshold += 1
+                    item["action"] = "WATCH_ONLY"
+                    item["reason"] = f"监听：{quote.timestamp} 最新 {latest:.2f}，观察池仅跟踪，不触发买入；距参考触发 {trigger:.2f} 还差 {max(distance_pct, 0):.2f}%"
+                    continue
                 if now.time() < dt.time(9, 45):
                     item["action"] = "WAIT"
                     item["reason"] = f"监听：{quote.timestamp} 最新 {latest:.2f}，有效阈值 {trigger:.2f}，9:45 前只观察"
@@ -546,13 +591,25 @@ class CandidateWatchWorker(QThread):
                         near_threshold += 1
                     item["action"] = "WATCH_BUY"
                     item["reason"] = f"监听：{quote.timestamp} 最新 {latest:.2f}，距有效阈值 {trigger:.2f} 还差 {max(distance_pct, 0):.2f}%（接近线 {effective_near_pct:.2f}%）"
+            for item in sells:
+                quote = fetch_sina_quote(session, str(item.get("ticker") or ""))
+                if not quote:
+                    sell_unavailable += 1
+                    item["reason"] = "监听：持仓实时行情暂不可用，保留上次判断"
+                    continue
+                sell_watched += 1
+                if self.update_sell_item_from_quote(item, quote.price, quote.timestamp):
+                    sell_triggered += 1
             self.payload["watched_at"] = now.isoformat(timespec="seconds")
             self.payload["watch_summary"] = {
                 "watched": watched,
                 "triggered": triggered,
                 "near_threshold": near_threshold,
                 "unavailable": unavailable,
-                "limit": self.limit,
+                "sell_watched": sell_watched,
+                "sell_triggered": sell_triggered,
+                "sell_unavailable": sell_unavailable,
+                "limit": len(buys),
                 "trigger_adjust_pct": self.trigger_adjust_pct,
                 "near_threshold_pct": self.near_threshold_pct,
                 "min_near_ticks": LIVE_WATCH_MIN_NEAR_TICKS,
@@ -1920,17 +1977,18 @@ class MainWindow(QMainWindow):
         if payload_date != now.date():
             return False, "扫描结果不是今天"
         buys = [item for item in self.current_payload.get("buy") or [] if isinstance(item, dict) and item.get("ticker")]
-        if not buys:
-            return False, "扫描结果里没有候选股"
+        sells = [item for item in self.current_payload.get("sell") or [] if isinstance(item, dict) and item.get("ticker")]
+        if not buys and not sells:
+            return False, "扫描结果里没有候选股或持仓"
         return True, ""
 
     def check_live_candidate_watch(self) -> None:
         now = dt.datetime.now()
         ok, reason = self.should_live_candidate_watch(now)
         if not ok:
-            if self.live_watch_fast_mode and reason in {"不在交易监听时段", "没有可监听的扫描结果", "扫描结果不是今天"}:
+            if self.live_watch_fast_mode and reason in {"不在交易监听时段", "没有可监听的扫描结果", "扫描结果不是今天", "扫描结果里没有候选股或持仓"}:
                 self.set_live_watch_interval_mode(False, reason)
-            if reason in {"没有可监听的扫描结果", "扫描结果不是今天"}:
+            if reason in {"没有可监听的扫描结果", "扫描结果不是今天", "扫描结果里没有候选股或持仓"}:
                 if self.last_live_watch_skip_log_at is None or (now - self.last_live_watch_skip_log_at).total_seconds() >= 300:
                     self.last_live_watch_skip_log_at = now
                     self.append_log(f"候选监听跳过：{reason}")
@@ -1952,15 +2010,23 @@ class MainWindow(QMainWindow):
         triggered = int(summary.get("triggered") or 0)
         near_threshold = int(summary.get("near_threshold") or 0)
         unavailable = int(summary.get("unavailable") or 0)
-        self.status_label.setText("有买入触发" if triggered else "候选监听中")
+        sell_watched = int(summary.get("sell_watched") or 0)
+        sell_triggered = int(summary.get("sell_triggered") or 0)
+        sell_unavailable = int(summary.get("sell_unavailable") or 0)
+        self.status_label.setText("有交易触发" if triggered or sell_triggered else "候选/持仓监听中")
         closest = summary.get("closest_distance_pct")
         closest_text = f"，最近差 {float(closest):.2f}%" if closest is not None else ""
-        self.append_log(f"候选监听完成：监听 {watched} 只，接近阈值 {near_threshold} 只，触发 {triggered} 只，行情不可用 {unavailable} 只{closest_text}")
-        self.set_live_watch_interval_mode(
-            near_threshold > 0 or triggered > 0,
-            f"{near_threshold} 只接近阈值，{triggered} 只触发" if near_threshold > 0 or triggered > 0 else "暂未接近阈值",
+        self.append_log(
+            f"候选/持仓监听完成：候选 {watched} 只，接近阈值 {near_threshold} 只，买入触发 {triggered} 只，"
+            f"持仓 {sell_watched} 只，卖出触发 {sell_triggered} 只，行情不可用 候选{unavailable}/持仓{sell_unavailable} 只{closest_text}"
         )
-        self.alert_payload_actions(payload, "候选监听", include_sells=False)
+        self.set_live_watch_interval_mode(
+            near_threshold > 0 or triggered > 0 or sell_triggered > 0,
+            f"{near_threshold} 只接近阈值，买入{triggered}只，卖出{sell_triggered}只"
+            if near_threshold > 0 or triggered > 0 or sell_triggered > 0
+            else "暂未接近阈值",
+        )
+        self.alert_payload_actions(payload, "候选/持仓监听", include_sells=True)
 
     def on_live_candidate_watch_failed(self, message: str) -> None:
         write_scan_debug_log(f"[live-watch] 监听失败：{message}")

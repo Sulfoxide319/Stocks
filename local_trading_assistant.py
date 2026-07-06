@@ -16,12 +16,15 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import requests
+
 from dependency_bootstrap import ensure_project_dependencies
 
 ensure_project_dependencies()
 
 from baostock_intraday import BaoStock5mClient
 from broker_position_sync import calculate_holding_management_lines, calculate_profit_protection_result
+from short_term_live_monitor import fetch_sina_quote
 from trading_journal import archive_trading_day, record_assistant_run
 from app_storage import connect as connect_app_storage
 from app_storage import default_db_path, export_open_positions_csv, save_latest_snapshot, update_positions_from_csv
@@ -523,6 +526,11 @@ def build_buy_advice(rows: list[dict[str, str]], phase: str) -> list[BuyAdvice]:
             final_action = "WATCH_BUY"
             buy_enabled = False
             reason = "进入观察池，但低于买入分数线；仅跟踪，不触发买入"
+        elif action == "OBSERVE_ONLY":
+            priority = 4
+            final_action = "WATCH_ONLY"
+            buy_enabled = False
+            reason = row.get("risks", "") or "扩展观察池，仅跟踪，不触发买入"
         elif action in {"WATCH", "WATCH_NEXT_SESSION"}:
             priority = 2 if phase in {"opening", "intraday"} else 4
             final_action = "WATCH_BUY"
@@ -632,10 +640,26 @@ def write_positions(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def latest_vwap_for_position(client: BaoStock5mClient, ticker: str, today: dt.date) -> tuple[float, float, float, str]:
+def quote_time_text(timestamp: str) -> str:
+    parts = str(timestamp or "").split()
+    if len(parts) >= 2:
+        return parts[-1][:5]
+    return str(timestamp or "")[:5]
+
+
+def latest_vwap_for_position(
+    client: BaoStock5mClient,
+    ticker: str,
+    today: dt.date,
+    quote_session: requests.Session | None = None,
+) -> tuple[float, float, float, str]:
     bars = client.fetch_5m(ticker, today, today)
     bars = [bar for bar in bars if dt.time(9, 30) <= bar.time <= dt.time(15, 0)]
     if not bars:
+        if quote_session is not None and today == dt.date.today():
+            quote = fetch_sina_quote(quote_session, ticker)
+            if quote:
+                return quote.price, 0.0, quote.price, quote_time_text(quote.timestamp)
         return 0.0, 0.0, 0.0, ""
     amount = sum(bar.amount for bar in bars)
     volume = sum(bar.volume for bar in bars)
@@ -656,7 +680,7 @@ def build_sell_advice(
     if not positions:
         return advices
     changed = False
-    with BaoStock5mClient() as client:
+    with requests.Session() as quote_session, BaoStock5mClient() as client:
         for row in positions:
             ticker = row.get("ticker", "")
             if not ticker:
@@ -671,7 +695,8 @@ def build_sell_advice(
             current_state = normalize_management_state(row.get("management_state"), row.get("status", "open"))
             if first_manage_price <= 0:
                 first_manage_price = first_manage_price_from_position(buy_price, target_price)
-            latest, vwap, intraday_high, latest_time = latest_vwap_for_position(client, ticker, today)
+            latest, vwap, intraday_high, latest_time = latest_vwap_for_position(client, ticker, today, quote_session)
+            quote_only = latest > 0 and vwap <= 0
             vwap_fail_price = min(vwap, buy_price) if vwap > 0 and buy_price > 0 else 0.0
             if latest <= 0:
                 trailing_stop_price = previous_highest * (1 - trailing_stop_pct / 100) if previous_highest > buy_price else 0.0
@@ -796,6 +821,8 @@ def build_sell_advice(
             else:
                 action = "HOLD"
                 reason = "未触发止盈、止损、VWAP弱势或收盘前减仓条件"
+            if quote_only:
+                reason += "；实时价兜底，暂无5分钟VWAP，VWAP弱势条件本轮不判定"
             old_state = row.get("management_state", "")
             old_signal_action = row.get("last_signal_action", "")
             old_signal_at = row.get("last_signal_at", "")

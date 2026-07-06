@@ -89,6 +89,12 @@ class MonitorCandidate:
 
 
 @dataclass(frozen=True)
+class ObservationSeed:
+    row: PatternRow
+    reject_reason: str
+
+
+@dataclass(frozen=True)
 class EventScoreContext:
     path: Path | None
     scores: dict[str, int]
@@ -227,7 +233,7 @@ def normalize_candidate_capital(candidates: list[MonitorCandidate], max_position
             (idx, item)
             for idx, item in enumerate(candidates)
             if item.suggested_capital_pct > 0
-            and item.action not in {"DATA_UNAVAILABLE", "QUOTE_ONLY", "NO_NEW_ENTRY", "WATCH_SCORE_ONLY"}
+            and item.action not in {"DATA_UNAVAILABLE", "QUOTE_ONLY", "NO_NEW_ENTRY", "WATCH_SCORE_ONLY", "OBSERVE_ONLY"}
         ],
         key=lambda pair: (
             -pair[1].position_quality_score,
@@ -507,6 +513,41 @@ def latest_intraday_state(
     return action, latest.close, vwap, latest.time.isoformat(timespec="minutes"), trigger, reasons, risks
 
 
+def reject_reason_label(reason: str) -> str:
+    labels = {
+        "range_too_wide": "5日振幅过大",
+        "atr_too_low": "ATR过低",
+        "momentum10_too_low": "冷市10日动量不足",
+        "momentum10_too_high": "10日涨幅过热",
+        "close_position_too_high": "20日位置过高",
+        "score_below_min": "分数不足",
+        "setup_not_allowed": "形态不允许",
+        "below_ma20": "未站上20日线",
+        "too_far_above_ma5": "离MA5过远",
+        "too_far_from_20d_high": "离20日高点过远",
+        "traded_value_below_200m": "成交额不足",
+        "hot_market_skipped": "热行情暂停新开仓",
+    }
+    return labels.get(reason, reason)
+
+
+def observation_seed_rank(seed: ObservationSeed) -> tuple[float, float, float, float]:
+    row = seed.row
+    reason_weight = {
+        "score_below_min": 5.0,
+        "close_position_too_high": 4.0,
+        "range_too_wide": 3.0,
+        "momentum10_too_high": 2.5,
+        "hot_market_skipped": 2.0,
+    }.get(seed.reject_reason, 1.0)
+    return (
+        reason_weight,
+        row.score,
+        row.traded_value_ratio,
+        -abs(row.distance_to_20d_high_pct),
+    )
+
+
 def edge_score(row: PatternRow, target_pct: float, stop_pct: float) -> float:
     return estimated_edge_score(
         row.score,
@@ -577,6 +618,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-score", type=float, default=83)
     parser.add_argument("--buy-min-score", type=float, default=90)
     parser.add_argument("--top", type=int, default=30)
+    parser.add_argument("--min-observation-candidates", type=int, default=8, help="fill with observe-only rows when strict filters leave too few candidates")
     parser.add_argument("--max-positions", type=int, default=3)
     parser.add_argument("--position-sizing-mode", choices=["equal", "score_linear", "edge_linear", "quality"], default="quality")
     parser.add_argument("--quality-capital-min-factor", type=float, default=0.70)
@@ -773,6 +815,7 @@ def main() -> int:
     active_max_close_position = float(overrides.get("max_close_position_20d_pct", args.max_close_position_20d_pct))
 
     candidates: list[MonitorCandidate] = []
+    observation_seeds: dict[str, ObservationSeed] = {}
     filter_counts: dict[str, int] = {
         "universe": total_symbols,
         "no_signal_row": 0,
@@ -790,15 +833,17 @@ def main() -> int:
         "hot_market_skipped": 0,
         "passed_daily_filters": 0,
     }
+    def remember_observation(row: PatternRow | None, reject_reason: str) -> None:
+        if row is None or row.ticker in observation_seeds:
+            return
+        observation_seeds[row.ticker] = ObservationSeed(row=row, reject_reason=reject_reason)
+
     entry_end = active_entry_end_time(args, str(temperature["state"]))
     monitor_progress("筛选候选股并检查盘中数据")
     with BaoStock5mClient() as client:
         for index, symbol in enumerate(symbols, start=1):
             if index == 1 or index % 10 == 0:
                 monitor_progress(f"候选过滤 {index}/{total_symbols}：{symbol.ticker} {symbol.name}")
-            if args.skip_hot_entries and str(temperature["state"]) == "hot":
-                filter_counts["hot_market_skipped"] += 1
-                continue
             bars = price_map.get(symbol.ticker, [])
             sector = sector_by_ticker.get(symbol.ticker, "other_tech")
             sector_momentum, sector_above = sector_context.get(sector, (0.0, 0.0))
@@ -806,24 +851,34 @@ def main() -> int:
             if not row:
                 filter_counts["no_signal_row"] += 1
                 continue
+            if args.skip_hot_entries and str(temperature["state"]) == "hot":
+                filter_counts["hot_market_skipped"] += 1
+                remember_observation(row, "hot_market_skipped")
+                continue
             if active_max_5d_range > 0 and row.max_5d_range_pct > active_max_5d_range:
                 filter_counts["range_too_wide"] += 1
+                remember_observation(row, "range_too_wide")
                 continue
             if active_min_atr > 0 and row.atr_pct < active_min_atr:
                 filter_counts["atr_too_low"] += 1
+                remember_observation(row, "atr_too_low")
                 continue
             if active_min_momentum_10d > -999 and row.momentum_10d_pct < active_min_momentum_10d:
                 filter_counts["momentum10_too_low"] += 1
+                remember_observation(row, "momentum10_too_low")
                 continue
             if active_max_momentum_10d < 999 and row.momentum_10d_pct > active_max_momentum_10d:
                 filter_counts["momentum10_too_high"] += 1
+                remember_observation(row, "momentum10_too_high")
                 continue
             if active_max_close_position < 100 and row.close_position_20d_pct > active_max_close_position:
                 filter_counts["close_position_too_high"] += 1
+                remember_observation(row, "close_position_too_high")
                 continue
             strategy_reason = strategy_reject_reason(row, active_min_score, args.ma5_extension_limit)
             if strategy_reason:
                 filter_counts[strategy_reason] += 1
+                remember_observation(row, strategy_reason)
                 continue
             filter_counts["passed_daily_filters"] += 1
             trail_atr_mult = state_trail_atr_mult(args, str(temperature["state"]))
@@ -947,6 +1002,109 @@ def main() -> int:
                     risks=",".join(risks),
                 )
             )
+    target_observation_count = min(max(0, int(args.min_observation_candidates)), max(0, int(args.top)))
+    if len(candidates) < target_observation_count and observation_seeds:
+        existing_tickers = {item.ticker for item in candidates}
+        needed = target_observation_count - len(candidates)
+        selected_observations = [
+            seed
+            for seed in sorted(observation_seeds.values(), key=observation_seed_rank, reverse=True)
+            if seed.row.ticker not in existing_tickers
+        ][:needed]
+        for seed in selected_observations:
+            row = seed.row
+            quote = (
+                fetch_sina_quote(session, row.ticker)
+                if args.mode == "intraday" and args.quote_fallback == "sina" and today == dt.date.today()
+                else None
+            )
+            latest_price = quote.price if quote else row.close
+            intraday_time = quote.timestamp if quote else "daily_close"
+            trigger = row.close * (1 + args.confirm_buffer)
+            trail_atr_mult = state_trail_atr_mult(args, str(temperature["state"]))
+            target, stop, trail = dynamic_exit_params(row, 0.9, 0.35, 0.45, trail_atr_mult)
+            first_manage = first_manage_pct_from_target(target)
+            first_manage_price = latest_price * (1 + first_manage) if latest_price > 0 else 0.0
+            hit_rates = historical_hit_rates(
+                str(temperature["state"]),
+                hit_rate_calibration,
+                setup_type=row.setup_type,
+                score=row.score,
+                traded_value_ratio=row.traded_value_ratio,
+                atr_pct=row.atr_pct,
+                momentum_10d_pct=row.momentum_10d_pct,
+                sector_group=row.sector_group,
+            )
+            edge_value = round(edge_score(row, target, stop), 4)
+            sizing = position_sizing_for_signal(
+                mode=str(args.position_sizing_mode),
+                score=row.score,
+                setup_type=row.setup_type,
+                target_pct=target,
+                hard_stop_pct=stop,
+                traded_value_ratio=row.traded_value_ratio,
+                atr_pct=row.atr_pct,
+                momentum_3d_pct=row.momentum_3d_pct,
+                momentum_10d_pct=row.momentum_10d_pct,
+                distance_to_ma5_pct=row.distance_to_ma5_pct,
+                close_position_20d_pct=row.close_position_20d_pct,
+                sector_momentum_5d_pct=row.sector_momentum_5d_pct,
+                edge_score_value=edge_value,
+                first_manage_hit_rate_pct=hit_rates.first_manage_hit_rate_pct,
+                target_upper_hit_rate_pct=hit_rates.target_upper_hit_rate_pct,
+                target_upper_touch_rate_pct=hit_rates.target_upper_touch_rate_pct,
+                hit_rate_sample_size=hit_rates.sample_size,
+                max_positions=args.max_positions,
+                market_capital_factor=0.0,
+                min_factor=args.quality_capital_min_factor,
+                max_factor=args.quality_capital_max_factor,
+                max_single_position_pct=args.max_single_position_pct,
+            )
+            label = reject_reason_label(seed.reject_reason)
+            candidates.append(
+                MonitorCandidate(
+                    ticker=row.ticker,
+                    name=row.name,
+                    signal_date=row.date,
+                    setup_type=row.setup_type,
+                    score=row.score,
+                    edge_score=edge_value,
+                    action="OBSERVE_ONLY",
+                    close=row.close,
+                    latest_price=round(latest_price, 4),
+                    intraday_vwap=0.0,
+                    intraday_time=intraday_time,
+                    entry_trigger=round(trigger, 4),
+                    target_pct=round(target * 100, 2),
+                    hard_stop_pct=round(stop * 100, 2),
+                    trailing_stop_pct=round(trail * 100, 2),
+                    first_manage_pct=round(first_manage * 100, 2),
+                    first_manage_price=round(first_manage_price, 4),
+                    target_upper_hit_rate_pct=hit_rates.target_upper_hit_rate_pct,
+                    target_upper_touch_rate_pct=hit_rates.target_upper_touch_rate_pct,
+                    first_manage_hit_rate_pct=hit_rates.first_manage_hit_rate_pct,
+                    hit_rate_sample_size=hit_rates.sample_size,
+                    hit_rate_source=hit_rates.source,
+                    hit_rate_bucket=hit_rates.bucket,
+                    hit_rate_warning=hit_rates.warning,
+                    position_quality_score=sizing.quality_score,
+                    position_quality_grade=sizing.quality_grade,
+                    capital_factor=0.0,
+                    suggested_capital_pct=0.0,
+                    capital_reason=f"扩展观察池：{label}；仅监听，不提示投入资金",
+                    market_state=str(temperature["state"]),
+                    event_score=int(event_scores.get(row.ticker, 0)),
+                    ma5_distance_pct=row.distance_to_ma5_pct,
+                    value_ratio=row.traded_value_ratio,
+                    momentum_3d_pct=row.momentum_3d_pct,
+                    sector_group=row.sector_group,
+                    sector_momentum_5d_pct=row.sector_momentum_5d_pct,
+                    reasons="observe_only",
+                    risks=label,
+                )
+            )
+        if selected_observations:
+            monitor_progress(f"扩展观察池：补充 {len(selected_observations)} 条，仅监听不买入")
     monitor_progress(f"写入候选结果：{len(candidates)} 条")
     funnel_parts = [
         f"股票池 {filter_counts['universe']}",
@@ -972,6 +1130,7 @@ def main() -> int:
         "WAIT_0945": 2,
         "WATCH_NEXT_SESSION": 2,
         "WATCH_SCORE_ONLY": 2,
+        "OBSERVE_ONLY": 2,
         "NO_NEW_ENTRY": 1,
         "QUOTE_ONLY": 0,
         "DATA_UNAVAILABLE": 0,
