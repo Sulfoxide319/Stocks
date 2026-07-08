@@ -11,6 +11,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -958,7 +959,14 @@ def git_publish(cwd: Path, args: argparse.Namespace, files: list[Path]) -> None:
         return
     if args.git_branch:
         run_command(["git", "checkout", args.git_branch], cwd)
-    rel_files = [str(path.relative_to(cwd)) for path in files if path.exists()]
+    rel_files: list[str] = []
+    for path in files:
+        if not path.exists():
+            continue
+        try:
+            rel_files.append(str(path.resolve().relative_to(cwd.resolve())))
+        except ValueError:
+            continue
     if not rel_files:
         return
     run_command(["git", "add", *rel_files], cwd)
@@ -969,6 +977,37 @@ def git_publish(cwd: Path, args: argparse.Namespace, files: list[Path]) -> None:
     run_command(["git", "push"], cwd)
 
 
+def resolve_path(base: Path, value: str) -> Path:
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+
+def ensure_writable_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    probe = Path(tempfile.mktemp(prefix=".write_probe_", dir=str(path)))
+    try:
+        probe.write_text("ok", encoding="utf-8")
+    finally:
+        try:
+            probe.unlink()
+        except FileNotFoundError:
+            pass
+    return path
+
+
+def fallback_output_dir() -> Path:
+    return (default_db_path().parent / "output" / "trading_assistant").resolve()
+
+
+def prepare_output_dir(preferred: Path) -> Path:
+    try:
+        return ensure_writable_dir(preferred)
+    except OSError as exc:
+        fallback = fallback_output_dir()
+        emit_progress(11, f"输出目录不可写，切换到本地数据目录：{fallback}；原错误：{exc}")
+        return ensure_writable_dir(fallback)
+
+
 def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
     emit_progress(10, "开始准备扫描")
     now = dt.datetime.now()
@@ -976,11 +1015,11 @@ def run_once(args: argparse.Namespace, cwd: Path) -> tuple[Path, Path, Path]:
     phase = phase_for_time(now) if args.phase == "auto" else args.phase
     if phase == "closed":
         phase = "postclose" if args.once else "closed"
-    out_dir = (cwd / args.out_dir).resolve()
+    out_dir = resolve_path(cwd, args.out_dir)
     emit_progress(11, "准备输出目录")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    app_db_path = Path(args.app_db).resolve() if args.app_db else default_db_path()
-    positions_path = cwd / args.positions
+    out_dir = prepare_output_dir(out_dir)
+    app_db_path = resolve_path(cwd, args.app_db) if args.app_db else default_db_path()
+    positions_path = resolve_path(cwd, args.positions)
     if args.use_app_db:
         emit_progress(12, "读取本地持仓数据")
         positions_path = out_dir / "runtime_positions.csv"

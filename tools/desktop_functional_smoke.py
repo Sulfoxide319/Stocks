@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import desktop_app  # noqa: E402
+import local_trading_assistant as lta  # noqa: E402
 from app_storage import connect, export_open_positions_csv, get_setting, list_positions, set_setting  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QDoubleSpinBox, QTableWidget  # noqa: E402
@@ -358,6 +359,15 @@ def test_live_watch_observes_disabled_buy_and_positions() -> None:
     assert_true(summary["triggered"] == 0 and summary["sell_triggered"] == 1, "watch summary should keep buy/sell triggers separate")
 
 
+def test_output_dir_fallback(temp_root: Path) -> None:
+    bad_parent = temp_root / "blocked_workspace" / "output"
+    bad_parent.parent.mkdir(parents=True, exist_ok=True)
+    bad_parent.write_text("not a directory", encoding="utf-8")
+    fallback = lta.prepare_output_dir(bad_parent / "trading_assistant")
+    assert_true(fallback.exists() and fallback.is_dir(), "fallback output directory should be created")
+    assert_true(fallback.parent.parent.samefile(desktop_app.app_data_dir()), "fallback output should live under app data")
+
+
 def main() -> int:
     temp_root = Path(tempfile.mkdtemp(prefix="stocks-functional-smoke-"))
     try:
@@ -367,6 +377,7 @@ def main() -> int:
         test_popup_interactions(app, window)
         test_alert_dedup(window)
         test_live_watch_observes_disabled_buy_and_positions()
+        test_output_dir_fallback(temp_root)
         window.close()
         app.processEvents()
         print("ok desktop functional smoke")
